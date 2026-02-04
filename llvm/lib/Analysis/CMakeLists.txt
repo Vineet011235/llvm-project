@@ -47,6 +47,7 @@ add_llvm_component_library(LLVMAnalysis
   BranchProbabilityInfo.cpp
   CFG.cpp
   CFGPrinter.cpp
+  CFGDomAnalysis.cpp
   CFGSCCPrinter.cpp
   CGSCCPassManager.cpp
   CallGraph.cpp

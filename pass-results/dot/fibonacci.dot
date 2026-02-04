@@ -1,0 +1,13 @@
+digraph CFG {
+  node [shape=box, fontname="monospace", style=filled];
+  edge [penwidth=1.5];
+
+  BB_0 [label="BB_0\l2 instructions\l  %cmp = icmp slt i32 %n, 2, !dbg !37\l  br i1 %cmp, label %return, label %for.body, !dbg !39\l", fillcolor="lightblue", fontcolor="black"];
+  BB_1 [label="BB_1\l7 instructions\l  %i.09 = phi i32 [ %inc, %for.body ], [ 2, %entry ]\l  %curr.08 = phi i32 [ %add, %for.body ], [ 1, %entry ]\l...\l  %exitcond.not = icmp eq i32 %i.09, %n, !dbg !44\l  br i1 %exitcond.not, label %return, label %for.body, !dbg ...\l", fillcolor="lightyellow", fontcolor="black"];
+  BB_2 [label="BB_2\l2 instructions\l  %retval.0 = phi i32 [ %n, %entry ], [ %add, %for.body ], !...\l  ret i32 %retval.0, !dbg !51\l", fillcolor="lightgreen", fontcolor="black"];
+
+  BB_0 -> BB_2 [color="darkgreen", label="true"];
+  BB_0 -> BB_1 [color="red", label="false"];
+  BB_1 -> BB_2 [color="darkgreen", label="true"];
+  BB_1 -> BB_1 [color="red", label="false"];
+}
