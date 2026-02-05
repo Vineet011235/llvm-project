@@ -27,6 +27,7 @@ class MyBasicBlock {
   friend class CFGraph;
 public:
   MyBasicBlock(BasicBlock &BB);
+  MyBasicBlock(); // Default constructor for virtual exit node
 
   const std::string &getName() const { return Name; }
   BasicBlock *getBasicBlock() const { return BBRef; }
@@ -41,6 +42,9 @@ public:
   const std::set<MyBasicBlock *> &getDominators() const { return Dominators; }
   MyBasicBlock *getImmediateDominator() const { return IDom; }
 
+  const std::set<MyBasicBlock *> &getPostDominators() const { return PostDominators; }
+  MyBasicBlock *getImmediatePostDominator() const { return IPostDom; }
+
 private:
   BasicBlock *BBRef;
   std::string Name;
@@ -52,6 +56,10 @@ private:
   // Dominator information
   std::set<MyBasicBlock *> Dominators;
   MyBasicBlock *IDom;
+
+  // Post-Dominator information
+  std::set<MyBasicBlock *> PostDominators;
+  MyBasicBlock *IPostDom;
 
   static inline int idCounter = 0;
   static int getNextID() { return idCounter++; }
@@ -68,16 +76,24 @@ private:
   std::map<BasicBlock *, MyBasicBlock *> BBMap;
 
   MyBasicBlock* EntryBlock; // Track the entry point
+  MyBasicBlock* VirtualExit; // Virtual exit node for post-dominator calculation
   Function *ParentFunction; // Track the parent function for verification
+  
   // Helper methods
   void dfsPostOrder(MyBasicBlock* node, std::set<MyBasicBlock*>& visited, 
                     std::vector<MyBasicBlock*>& postOrder);
+  void dfsPostOrderReverse(MyBasicBlock* node, std::set<MyBasicBlock*>& visited,
+                          std::vector<MyBasicBlock*>& postOrder);
   void calculateDominators();
+  void calculatePostDominators();
 
 public:
   CFGraph(Function &F);
+  ~CFGraph();
   Function *getParentFunction() const { return ParentFunction; }
   void emitDot(const std::string &FilePath) const;
+  MyBasicBlock* getVirtualExit() const { return VirtualExit; }
+  void writeDominatorsToFile(const std::string &FilePath) const;
 };
 
 class DOMTree {

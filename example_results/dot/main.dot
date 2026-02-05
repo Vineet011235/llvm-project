@@ -1,0 +1,7 @@
+digraph CFG {
+  node [shape=box, fontname="monospace", style=filled];
+  edge [penwidth=1.5];
+
+  BB_0 [label="BB_0\l5 instructions\l  %retval = alloca i32, align 4\l  %x = alloca i32, align 4\l...\l  store i32 10, ptr %x, align 4, !dbg !16\l  ret i32 0, !dbg !17\l", fillcolor="lightblue", fontcolor="black"];
+
+}

@@ -38,6 +38,12 @@ static cl::opt<bool> SHOW_REPORT(
     cl::init(false)
 );
 
+static cl::opt<bool> SHOW_DOMINATORS(
+    "show-dominators",
+    cl::desc("Whether to generate a .txt file with pre and post dominators for each block"),
+    cl::init(false)
+);
+
 // Track if we've initialized the verification report file
 static bool VerificationReportInitialized = false;
 
@@ -49,17 +55,28 @@ MyBasicBlock::MyBasicBlock(BasicBlock &BB)
     : BBRef(&BB),
       Name("BB_" + std::to_string(getNextID())),
       TerminatorInst(BB.getTerminator()),
-      IDom(nullptr) {
+      IDom(nullptr),
+      IPostDom(nullptr) {
 
   for (Instruction &I : BB)
     BlockInstructions.push_back(&I);
+}
+
+// Default constructor for virtual exit node
+MyBasicBlock::MyBasicBlock()
+    : BBRef(nullptr),
+      Name("VirtualExit"),
+      TerminatorInst(nullptr),
+      IDom(nullptr),
+      IPostDom(nullptr) {
+  // Empty - virtual node has no instructions
 }
 
 // ============================================================================
 // CFGraph Implementation
 // ============================================================================
 
-CFGraph::CFGraph(Function &F) : ParentFunction(&F) {  
+CFGraph::CFGraph(Function &F) : VirtualExit(nullptr), ParentFunction(&F) {  
   // 1. Create blocks
   for (BasicBlock &BB : F) {
     Blocks.push_back(std::make_unique<MyBasicBlock>(BB));
@@ -134,6 +151,56 @@ CFGraph::CFGraph(Function &F) : ParentFunction(&F) {
 
   // 5. Run Analysis
   calculateDominators();
+  
+  // 6. Create Virtual Exit Node for Post-Dominator Analysis
+  // Critical for handling multiple exit blocks correctly
+  // Note: VirtualExit uses default constructor - doesn't correspond to a real BasicBlock
+  VirtualExit = new MyBasicBlock();
+  
+  // Find all exit blocks (blocks with no successors or return/unreachable instructions)
+  std::vector<MyBasicBlock*> exitBlocks;
+  for (const auto &BlockPtr : Blocks) {
+    MyBasicBlock *BB = BlockPtr.get();
+    // Only consider reachable blocks
+    if (reachable.find(BB) == reachable.end()) continue;
+    
+    // A block is an exit if:
+    // 1. It has no successors, OR
+    // 2. It has a return/unreachable terminator
+    Instruction *TI = BB->getTerminator();
+    if (BB->Successors.empty() || 
+        isa<ReturnInst>(TI) || 
+        isa<UnreachableInst>(TI)) {
+      exitBlocks.push_back(BB);
+    }
+  }
+  
+  // If no exit blocks found, use all blocks with no successors
+  if (exitBlocks.empty()) {
+    for (const auto &BlockPtr : Blocks) {
+      MyBasicBlock *BB = BlockPtr.get();
+      if (reachable.find(BB) != reachable.end() && BB->Successors.empty()) {
+        exitBlocks.push_back(BB);
+      }
+    }
+  }
+  
+  // Connect all exit blocks to virtual exit
+  for (MyBasicBlock *exitBB : exitBlocks) {
+    exitBB->Successors.push_back(VirtualExit);
+    VirtualExit->Predecessors.push_back(exitBB);
+  }
+  
+  // 7. Calculate Post-Dominators
+  calculatePostDominators();
+}
+
+// Destructor to clean up virtual exit node
+CFGraph::~CFGraph() {
+  if (VirtualExit) {
+    delete VirtualExit;
+    VirtualExit = nullptr;
+  }
 }
 
 void CFGraph::dfsPostOrder(MyBasicBlock* node, std::set<MyBasicBlock*>& visited, 
@@ -249,6 +316,305 @@ void CFGraph::calculateDominators() {
     }
     node->IDom = closestDom;
   }
+}
+
+// Helper for reverse DFS (traversing backwards from exit using predecessors)
+void CFGraph::dfsPostOrderReverse(MyBasicBlock* node, std::set<MyBasicBlock*>& visited,
+                                   std::vector<MyBasicBlock*>& postOrder) {
+  visited.insert(node);
+  for (auto* pred : node->Predecessors) {
+    if (visited.find(pred) == visited.end()) {
+      dfsPostOrderReverse(pred, visited, postOrder);
+    }
+  }
+  postOrder.push_back(node);
+}
+
+void CFGraph::calculatePostDominators() {
+  if (!VirtualExit) 
+    return;
+
+  // A. Compute reachable nodes from VirtualExit (backwards)
+  // This identifies which nodes can reach an exit
+  std::vector<MyBasicBlock*> postOrder;
+  std::set<MyBasicBlock*> reachableFromExit;
+  dfsPostOrderReverse(VirtualExit, reachableFromExit, postOrder);
+  
+  // Reverse to get "forward" order in reversed CFG
+  std::reverse(postOrder.begin(), postOrder.end());
+
+  // B. Initialize Sets
+  // PostDom(exit) = {exit}
+  VirtualExit->PostDominators.clear();
+  VirtualExit->PostDominators.insert(VirtualExit);
+
+  // PostDom(n) = {All Exit-Reachable Nodes} for n != exit
+  // Nodes not reachable from exit get empty post-dominator sets
+  std::set<MyBasicBlock*> allExitReachableNodes = reachableFromExit;
+
+  // Initialize regular blocks
+  for (auto& node : Blocks) {
+    if (reachableFromExit.find(node.get()) != reachableFromExit.end()) {
+      // Exit-reachable nodes initialized to all exit-reachable nodes
+      node->PostDominators = allExitReachableNodes;
+    } else {
+      // Unreachable-from-exit nodes (e.g., infinite loops) get themselves only
+      node->PostDominators.clear();
+      node->PostDominators.insert(node.get());
+    }
+  }
+
+  // C. Iterative Solver - CRITICAL: Use Successors, not Predecessors!
+  bool changed = true;
+  int iterations = 0;
+  const int MAX_ITERATIONS = 1000; // Safety limit
+  
+  while (changed && iterations < MAX_ITERATIONS) {
+    changed = false;
+    iterations++;
+    
+    // Iterate in our computed order
+    for (MyBasicBlock* node : postOrder) {
+      if (node == VirtualExit) 
+        continue;
+
+      // Skip nodes not reachable from exit
+      if (reachableFromExit.find(node) == reachableFromExit.end()) {
+        continue;
+      }
+
+      // Calculate Intersection of Successors
+      // PostDom(n) = {n} U (Intersect(PostDom(s)) for all s in successors)
+      std::set<MyBasicBlock*> newPostDom;
+      bool firstSucc = true;
+
+      for (MyBasicBlock* succ : node->Successors) {
+        // Skip successors that haven't been processed yet or aren't reachable
+        if (succ->PostDominators.empty()) 
+          continue;
+
+        if (firstSucc) {
+          newPostDom = succ->PostDominators;
+          firstSucc = false;
+        } else {
+          // Intersection
+          std::set<MyBasicBlock*> intersection;
+          std::set_intersection(newPostDom.begin(), newPostDom.end(),
+                                succ->PostDominators.begin(), succ->PostDominators.end(),
+                                std::inserter(intersection, intersection.begin()));
+          newPostDom = intersection;
+        }
+      }
+
+      // Handle nodes with no successors or where no successor has post-doms yet
+      if (firstSucc && !node->Successors.empty()) {
+        // Successors exist but none have valid post-dominators yet
+        continue;
+      }
+
+      newPostDom.insert(node); // Union with {n}
+
+      if (newPostDom != node->PostDominators) {
+        node->PostDominators = newPostDom;
+        changed = true;
+      }
+    }
+  }
+
+  // D. Calculate Immediate Post-Dominators (IPostDom)
+  for (auto& nodePtr : Blocks) {
+    MyBasicBlock* node = nodePtr.get();
+
+    // Skip nodes not reachable from exit
+    if (reachableFromExit.find(node) == reachableFromExit.end()) {
+      node->IPostDom = nullptr;
+      continue;
+    }
+
+    // Find immediate post-dominator
+    MyBasicBlock* closestPostDom = nullptr;
+    size_t maxPostDomSize = 0;
+
+    for (MyBasicBlock* pdom : node->PostDominators) {
+      if (pdom == node) 
+        continue; // Strict post-dominators only
+
+      // If pdom has more post-dominators, it is "closer" to node
+      if (pdom->PostDominators.size() > maxPostDomSize) {
+        maxPostDomSize = pdom->PostDominators.size();
+        closestPostDom = pdom;
+      }
+    }
+    node->IPostDom = closestPostDom;
+  }
+  
+  // Special handling for VirtualExit - it has no post-dominator
+  VirtualExit->IPostDom = nullptr;
+}
+
+void CFGraph::writeDominatorsToFile(const std::string &FilePath) const {
+  std::error_code EC;
+  raw_fd_ostream File(FilePath, EC);
+
+  if (EC) {
+    errs() << "Error opening dominators file: " << EC.message() << "\n";
+    return;
+  }
+
+  File << "====================================================================\n";
+  File << "Dominator and Post-Dominator Analysis\n";
+  File << "====================================================================\n";
+  File << "Function: " << ParentFunction->getName() << "\n";
+  File << "Total Blocks: " << Blocks.size() << "\n";
+  File << "Entry Block: " << (EntryBlock ? EntryBlock->getName() : "None") << "\n";
+  File << "Virtual Exit: " << (VirtualExit ? VirtualExit->getName() : "None") << "\n";
+  File << "====================================================================\n\n";
+
+  // Iterate through all blocks in a stable order
+  for (const auto &BlockPtr : Blocks) {
+    MyBasicBlock *BB = BlockPtr.get();
+    
+    File << "--------------------------------------------------------------------\n";
+    File << "Block: " << BB->getName() << "\n";
+    File << "--------------------------------------------------------------------\n";
+    
+    // Show if this is the entry block
+    if (BB == EntryBlock) {
+      File << "[ENTRY BLOCK]\n";
+    }
+    
+    // Show terminator type
+    if (Instruction *TI = BB->getTerminator()) {
+      File << "Terminator: " << TI->getOpcodeName() << "\n";
+    } else {
+      File << "Terminator: None\n";
+    }
+    
+    File << "\n";
+    
+    // Predecessors
+    File << "Predecessors (" << BB->Predecessors.size() << "):\n";
+    if (BB->Predecessors.empty()) {
+      File << "  (none)\n";
+    } else {
+      for (MyBasicBlock *Pred : BB->Predecessors) {
+        File << "  - " << Pred->getName() << "\n";
+      }
+    }
+    File << "\n";
+    
+    // Successors
+    File << "Successors (" << BB->Successors.size() << "):\n";
+    if (BB->Successors.empty()) {
+      File << "  (none)\n";
+    } else {
+      for (MyBasicBlock *Succ : BB->Successors) {
+        File << "  - " << Succ->getName() << "\n";
+      }
+    }
+    File << "\n";
+    
+    // DOMINATORS (Pre-Dominators)
+    File << "DOMINATORS (Pre-Dominators) - Set (" << BB->Dominators.size() << "):\n";
+    if (BB->Dominators.empty()) {
+      File << "  (none - unreachable from entry)\n";
+    } else {
+      for (MyBasicBlock *Dom : BB->Dominators) {
+        File << "  - " << Dom->getName();
+        if (Dom == BB) {
+          File << " [self]";
+        }
+        File << "\n";
+      }
+    }
+    File << "\n";
+    
+    // Immediate Dominator
+    File << "Immediate Dominator (IDom):\n";
+    if (BB->IDom) {
+      File << "  " << BB->IDom->getName() << "\n";
+    } else if (BB == EntryBlock) {
+      File << "  (none - this is entry block)\n";
+    } else if (BB->Dominators.empty()) {
+      File << "  (none - unreachable block)\n";
+    } else {
+      File << "  (none)\n";
+    }
+    File << "\n";
+    
+    // POST-DOMINATORS
+    File << "POST-DOMINATORS - Set (" << BB->PostDominators.size() << "):\n";
+    if (BB->PostDominators.empty()) {
+      File << "  (none - unreachable from exit)\n";
+    } else if (BB->PostDominators.size() == 1 && BB->PostDominators.count(BB)) {
+      File << "  - " << BB->getName() << " [self only - possibly in infinite loop]\n";
+    } else {
+      for (MyBasicBlock *PostDom : BB->PostDominators) {
+        File << "  - " << PostDom->getName();
+        if (PostDom == BB) {
+          File << " [self]";
+        }
+        if (PostDom == VirtualExit) {
+          File << " [virtual-exit]";
+        }
+        File << "\n";
+      }
+    }
+    File << "\n";
+    
+    // Immediate Post-Dominator
+    File << "Immediate Post-Dominator (IPostDom):\n";
+    if (BB->IPostDom) {
+      File << "  " << BB->IPostDom->getName();
+      if (BB->IPostDom == VirtualExit) {
+        File << " [virtual-exit]";
+      }
+      File << "\n";
+    } else if (BB->PostDominators.empty()) {
+      File << "  (none - unreachable from exit)\n";
+    } else if (BB->PostDominators.size() == 1 && BB->PostDominators.count(BB)) {
+      File << "  (none - node only post-dominates itself)\n";
+    } else {
+      File << "  (none)\n";
+    }
+    File << "\n";
+  }
+  
+  // Add analysis for Virtual Exit if it exists
+  if (VirtualExit) {
+    File << "--------------------------------------------------------------------\n";
+    File << "Block: " << VirtualExit->getName() << " [SYNTHETIC]\n";
+    File << "--------------------------------------------------------------------\n";
+    File << "[VIRTUAL EXIT NODE - Used for Post-Dominator Analysis]\n";
+    File << "Terminator: None (synthetic)\n\n";
+    
+    File << "Predecessors (" << VirtualExit->Predecessors.size() << "):\n";
+    if (VirtualExit->Predecessors.empty()) {
+      File << "  (none)\n";
+    } else {
+      File << "  [These are the actual exit blocks of the function]\n";
+      for (MyBasicBlock *Pred : VirtualExit->Predecessors) {
+        File << "  - " << Pred->getName() << "\n";
+      }
+    }
+    File << "\n";
+    
+    File << "Successors: (none - this is the exit)\n\n";
+    
+    File << "POST-DOMINATORS - Set (" << VirtualExit->PostDominators.size() << "):\n";
+    for (MyBasicBlock *PostDom : VirtualExit->PostDominators) {
+      File << "  - " << PostDom->getName() << " [self]\n";
+    }
+    File << "\n";
+    
+    File << "Immediate Post-Dominator: (none - this is the exit node)\n\n";
+  }
+  
+  File << "====================================================================\n";
+  File << "End of Dominator Analysis\n";
+  File << "====================================================================\n";
+  
+  File.flush();
 }
 
 void CFGraph::emitDot(const std::string &FilePath) const {
@@ -733,6 +1099,13 @@ PreservedAnalyses CFGDomAnalysisPass::run(
     if (!result) {
       errs() << "Dominator Tree verification failed for function: " << F.getName() << "\n";
     }
+  }
+
+  // Generate dominators text file if requested
+  if (SHOW_DOMINATORS) {
+    std::string DomFileName = (RESULT_DIR + "/" + F.getName().str() + "_dominators.txt");
+    CFG.writeDominatorsToFile(DomFileName);
+    errs() << "Dominator analysis written to: " << DomFileName << "\n";
   }
 
   return PreservedAnalyses::all();

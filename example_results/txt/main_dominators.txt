@@ -1,0 +1,54 @@
+====================================================================
+Dominator and Post-Dominator Analysis
+====================================================================
+Function: main
+Total Blocks: 1
+Entry Block: BB_0
+Virtual Exit: VirtualExit
+====================================================================
+
+--------------------------------------------------------------------
+Block: BB_0
+--------------------------------------------------------------------
+[ENTRY BLOCK]
+Terminator: ret
+
+Predecessors (0):
+  (none)
+
+Successors (1):
+  - VirtualExit
+
+DOMINATORS (Pre-Dominators) - Set (1):
+  - BB_0 [self]
+
+Immediate Dominator (IDom):
+  (none - this is entry block)
+
+POST-DOMINATORS - Set (2):
+  - BB_0 [self]
+  - VirtualExit [virtual-exit]
+
+Immediate Post-Dominator (IPostDom):
+  VirtualExit [virtual-exit]
+
+--------------------------------------------------------------------
+Block: VirtualExit [SYNTHETIC]
+--------------------------------------------------------------------
+[VIRTUAL EXIT NODE - Used for Post-Dominator Analysis]
+Terminator: None (synthetic)
+
+Predecessors (1):
+  [These are the actual exit blocks of the function]
+  - BB_0
+
+Successors: (none - this is the exit)
+
+POST-DOMINATORS - Set (1):
+  - VirtualExit [self]
+
+Immediate Post-Dominator: (none - this is the exit node)
+
+====================================================================
+End of Dominator Analysis
+====================================================================
