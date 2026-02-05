@@ -1,0 +1,10 @@
+digraph DOMTree {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12];
+  edge [color="#2E86AB", penwidth=2, arrowsize=0.8];
+
+  "BB_6" [fillcolor="#06A77D", fontcolor="white", shape=box];
+  "BB_5" [fillcolor="#D62246", fontcolor="white", shape=box];
+  "BB_4" [fillcolor="#D62246", fontcolor="white", shape=box];
+
+}

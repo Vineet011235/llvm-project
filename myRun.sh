@@ -8,11 +8,12 @@ LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-$(pwd)/build}"
 CLANG_BIN="${CLANG_BIN:-$LLVM_BUILD_DIR/bin/clang}"
 OPT_BIN="${OPT_BIN:-$LLVM_BUILD_DIR/bin/opt}"
 
-MODE="dom"                       # cfg | dom
-OUT_DIR="./pass-results"       # Output directory for IR and DOT files
+MODE="verify"                       # cfg | dom | verify
+OUT_DIR=""                     # Output directory for IR and DOT files (auto-generated if empty)
+OUT_DIR_EXPLICIT=false           # Track if user specified output directory
 INPUT_SRC=""
-CFLAGS="-O1 -g" 
-# If O0 is used, the IR will have 'optnone' which prevents CFG emission. O1 or higher is recommended for testing.
+CFLAGS="-O0 -Xclang -disable-O0-optnone -g" 
+# Using O0 with optnone disabled to preserve unreachable code while allowing pass execution
 PASS_NAME="cfg-dom-analysis"
 DEFAULT_TEST_FILE="example.c"  # Default test file if none provided
 
@@ -22,16 +23,16 @@ DEFAULT_TEST_FILE="example.c"  # Default test file if none provided
 usage() {
   echo "Usage: $0 [options]"
   echo
-  echo "Options:"
-  echo "  -m <mode>        Mode: cfg | dom   (default: cfg)"
-  echo "  -o <out_dir>     Output directory (default: ./pass-results)"
-  echo "  -i <file.c/.cpp> Input C/C++ file (default: ./example.c)"
+  echo "Compiles C/C++ to LLVM IR, runs CFG/DOM analysis, and generates visualizations."
   echo
-  echo "Environment overrides:"
-  echo "  LLVM_BUILD_DIR   Path to llvm-project/build"
-  echo "  CLANG_BIN        Path to clang"
-  echo "  OPT_BIN          Path to opt"
-  exit 1
+  echo "Options:"
+  echo "  -i <file>        Input C/C++ source file (default: example.c)"
+  echo "  -m <mode>        Analysis mode: 'cfg' (control flow), 'dom' (dominators), or 'verify' (verify against LLVM) (default: dom)"
+  echo "  -o <dir>         Output directory (default: <input_dir>/<input_name>_results)"
+  echo "  -h               Show this help message"
+  echo
+  echo "Output: Creates ir/, dot/, and svg/ subdirectories with analysis results."
+  exit 0
 }
 
 # ==============================
@@ -40,7 +41,7 @@ usage() {
 while getopts "m:o:i:h" opt; do
   case "$opt" in
     m) MODE="$OPTARG" ;;
-    o) OUT_DIR="$OPTARG" ;;
+    o) OUT_DIR="$OPTARG"; OUT_DIR_EXPLICIT=true ;;
     i) INPUT_SRC="$OPTARG" ;;
     h) usage ;;
     *) usage ;;
@@ -51,8 +52,16 @@ if [[ -z "$INPUT_SRC" ]]; then
   INPUT_SRC="$DEFAULT_TEST_FILE"
 fi
 
-if [[ "$MODE" != "cfg" && "$MODE" != "dom" ]]; then
-  echo "Error: mode must be 'cfg' or 'dom'"
+# Auto-generate output directory name based on input file if not specified
+if [[ "$OUT_DIR_EXPLICIT" == false ]]; then
+  INPUT_DIR=$(dirname "$INPUT_SRC")
+  BASENAME=$(basename "$INPUT_SRC")
+  NAME="${BASENAME%.*}"
+  OUT_DIR="${INPUT_DIR}/${NAME}_results"
+fi
+
+if [[ "$MODE" != "cfg" && "$MODE" != "dom" && "$MODE" != "verify" ]]; then
+  echo "Error: mode must be 'cfg', 'dom', or 'verify'"
   exit 1
 fi
 
@@ -140,22 +149,37 @@ echo "[1/3] Compiling $INPUT_SRC → LLVM IR"
 # ==============================
 echo "[2/3] Running CFGDomAnalysis pass preferences: mode=$MODE"
 
-CFG_FLAGS="-cfg-dot-folder=$OUT_DIR/dot"
-DOM_ENABLE_FLAG="--emit-dom-tree"  # Flag to enable dominator tree emission in the pass
+# New CLI flags
+RESULT_DIR_FLAG="--result-dir=$OUT_DIR/dot"
+SHOW_CFG_FLAG="--show-cfg"
+SHOW_DOM_TREE_FLAG="--show-dom-tree"
+SHOW_REPORT_FLAG="--show-report"
 
 if [[ "$MODE" == "cfg" ]]; then
   "$OPT_BIN" \
     -passes="$PASS_NAME" \
-    $CFG_FLAGS \
+    $RESULT_DIR_FLAG \
+    $SHOW_CFG_FLAG \
     -disable-output \
     "$IR_FILE"
-else
-  # Placeholder for future dominator extension
+elif [[ "$MODE" == "verify" ]]; then
+  echo "\n=== Verifying Dominator Tree ==="
   "$OPT_BIN" \
     -passes="$PASS_NAME" \
-    $CFG_FLAGS \
+    $RESULT_DIR_FLAG \
+    $SHOW_CFG_FLAG \
+    $SHOW_DOM_TREE_FLAG \
+    $SHOW_REPORT_FLAG \
     -disable-output \
-    $DOM_ENABLE_FLAG \
+    "$IR_FILE" 2>&1 | tee "$OUT_DIR/verification_results.txt"
+else
+  # dom mode
+  "$OPT_BIN" \
+    -passes="$PASS_NAME" \
+    $RESULT_DIR_FLAG \
+    $SHOW_CFG_FLAG \
+    $SHOW_DOM_TREE_FLAG \
+    -disable-output \
     "$IR_FILE"
 fi
 

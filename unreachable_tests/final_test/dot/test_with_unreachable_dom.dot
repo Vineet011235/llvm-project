@@ -3,9 +3,10 @@ digraph DOMTree {
   node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12];
   edge [color="#2E86AB", penwidth=2, arrowsize=0.8];
 
-  "BB_0" [fillcolor="#F77F00", fontcolor="white", shape=box];
-  "BB_2" [fillcolor="#D62246", fontcolor="white", shape=box];
+  "BB_0" [fillcolor="#06A77D", fontcolor="white", shape=box];
   "BB_1" [fillcolor="#D62246", fontcolor="white", shape=box];
+  "BB_2" [fillcolor="#D62246", fontcolor="white", shape=box];
+  "BB_3" [fillcolor="#D62246", fontcolor="white", shape=box];
 
   "BB_0" -> "BB_1";
   "BB_0" -> "BB_2";

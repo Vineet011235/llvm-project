@@ -1,0 +1,2 @@
+✓ Function 'test_with_unreachable': PASSED (4 blocks verified)
+✓ Function 'another_test': PASSED (3 blocks verified)

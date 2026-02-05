@@ -1,0 +1,8 @@
+# Ignore generated analysis files
+*.dot
+*.svg
+*.ll
+
+# Ignore results directories
+results/
+*_results/

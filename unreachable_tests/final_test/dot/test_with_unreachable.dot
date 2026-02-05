@@ -1,0 +1,12 @@
+digraph CFG {
+  node [shape=box, fontname="monospace", style=filled];
+  edge [penwidth=1.5];
+
+  BB_0 [label="BB_0\l2 instructions\l  %cmp = icmp sgt i32 %x, 0\l  br i1 %cmp, label %if.then, label %if.else\l", fillcolor="lightblue", fontcolor="black"];
+  BB_1 [label="BB_1\l2 instructions\l  %mul = mul i32 %x, 2\l  ret i32 %mul\l", fillcolor="lightgreen", fontcolor="black"];
+  BB_2 [label="BB_2\l1 instructions\l  ret i32 0\l", fillcolor="lightgreen", fontcolor="black"];
+  BB_3 [label="BB_3\l2 instructions\l  %add = add i32 %x, 100\l  ret i32 %add\l", fillcolor="lightgreen", fontcolor="black"];
+
+  BB_0 -> BB_1 [color="darkgreen", label="true"];
+  BB_0 -> BB_2 [color="red", label="false"];
+}

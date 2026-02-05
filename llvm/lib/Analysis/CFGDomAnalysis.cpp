@@ -1,6 +1,7 @@
 #include "llvm/Analysis/CFGDomAnalysis.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
@@ -12,18 +13,33 @@
 using namespace llvm;
 
 // Command line options
-static cl::opt<std::string> CFG_DOT_FOLDER(
-    "cfg-dot-folder",
-    cl::desc("Directory to output CFG DOT files (if empty, no files will be generated)"),
+static cl::opt<std::string> RESULT_DIR(
+    "result-dir",
+    cl::desc("Directory to store all analysis results (CFG, DOM tree, verification report) [MUST EXIST]"),
     cl::value_desc("directory"),
     cl::init("")
 );
 
-static cl::opt<bool> EMIT_DOM_TREE(
-    "emit-dom-tree",
+static cl::opt<bool> SHOW_CFG(
+    "show-cfg",
+    cl::desc("Whether to emit the CFG DOT file"),
+    cl::init(false)
+);
+
+static cl::opt<bool> SHOW_DOM_TREE(
+    "show-dom-tree",
     cl::desc("Whether to emit the dominator tree DOT file"),
     cl::init(false)
 );
+
+static cl::opt<bool> SHOW_REPORT(
+    "show-report",
+    cl::desc("Whether to generate the dominator tree verification report"),
+    cl::init(false)
+);
+
+// Track if we've initialized the verification report file
+static bool VerificationReportInitialized = false;
 
 // ============================================================================
 // MyBasicBlock Implementation
@@ -32,7 +48,8 @@ static cl::opt<bool> EMIT_DOM_TREE(
 MyBasicBlock::MyBasicBlock(BasicBlock &BB)
     : BBRef(&BB),
       Name("BB_" + std::to_string(getNextID())),
-      TerminatorInst(BB.getTerminator()) {
+      TerminatorInst(BB.getTerminator()),
+      IDom(nullptr) {
 
   for (Instruction &I : BB)
     BlockInstructions.push_back(&I);
@@ -42,9 +59,7 @@ MyBasicBlock::MyBasicBlock(BasicBlock &BB)
 // CFGraph Implementation
 // ============================================================================
 
-CFGraph::CFGraph(Function &F) {
-  errs() << "Constructing CFGraph for function: " << F.getName() << "\n";
-  
+CFGraph::CFGraph(Function &F) : ParentFunction(&F) {  
   // 1. Create blocks
   for (BasicBlock &BB : F) {
     Blocks.push_back(std::make_unique<MyBasicBlock>(BB));
@@ -68,6 +83,8 @@ CFGraph::CFGraph(Function &F) {
       Edges.emplace_back(Src, BBMap[SI->getDefaultDest()]);
       for (auto Case : SI->cases())
         Edges.emplace_back(Src, BBMap[Case.getCaseSuccessor()]);
+    } else if(isa<ReturnInst>(TI)) {
+      // No successors for return instructions [Handled implicitly by having no edges]
     } else {
       // Handle other terminator types if needed
       errs() << "Unhandled terminator type in block " << Src->getName() 
@@ -75,13 +92,47 @@ CFGraph::CFGraph(Function &F) {
     }
   }
 
-  // 3. Attach Successors and Predecessors
+  // 3. Identify reachable blocks from entry
+  std::set<MyBasicBlock*> reachable;
+  std::function<void(MyBasicBlock*, std::set<MyBasicBlock*>&)> markReachable;
+  markReachable = [&](MyBasicBlock* node, std::set<MyBasicBlock*>& visited) {
+    if (visited.find(node) != visited.end()) return;
+    visited.insert(node);
+    
+    // Check successors via terminator
+    Instruction *TI = node->getTerminator();
+    if (auto *BI = dyn_cast<BranchInst>(TI)) {
+      for (unsigned i = 0; i < BI->getNumSuccessors(); ++i) {
+        BasicBlock *SuccBB = BI->getSuccessor(i);
+        if (BBMap.find(SuccBB) != BBMap.end()) {
+          markReachable(BBMap[SuccBB], visited);
+        }
+      }
+    } else if (auto *SI = dyn_cast<SwitchInst>(TI)) {
+      if (BBMap.find(SI->getDefaultDest()) != BBMap.end()) {
+        markReachable(BBMap[SI->getDefaultDest()], visited);
+      }
+      for (auto Case : SI->cases()) {
+        if (BBMap.find(Case.getCaseSuccessor()) != BBMap.end()) {
+          markReachable(BBMap[Case.getCaseSuccessor()], visited);
+        }
+      }
+    }
+  };
+  
+  markReachable(EntryBlock, reachable);
+
+  // 4. Attach Successors and Predecessors only for edges between reachable blocks
   for (const auto &E : Edges) {
-    E.first->Successors.push_back(E.second);
-    E.second->Predecessors.push_back(E.first);
+    // Only add edge if both source and destination are reachable
+    if (reachable.find(E.first) != reachable.end() && 
+        reachable.find(E.second) != reachable.end()) {
+      E.first->Successors.push_back(E.second);
+      E.second->Predecessors.push_back(E.first);
+    }
   }
 
-  // 4. Run Analysis
+  // 5. Run Analysis
   calculateDominators();
 }
 
@@ -111,14 +162,21 @@ void CFGraph::calculateDominators() {
   EntryBlock->Dominators.clear();
   EntryBlock->Dominators.insert(EntryBlock);
 
-  // Dom(n) = {All Nodes} for n != n_0
-  std::set<MyBasicBlock*> allNodes;
-  for(const auto& b : Blocks) 
-    allNodes.insert(b.get());
+  // Dom(n) = {All Reachable Nodes} for reachable n != n_0
+  // Unreachable nodes get empty dominator sets
+  std::set<MyBasicBlock*> allReachableNodes;
+  for(const auto& node : rpo) 
+    allReachableNodes.insert(node);
 
   for (auto& node : Blocks) {
     if (node.get() != EntryBlock) {
-      node->Dominators = allNodes;
+      // Only initialize dominators for reachable nodes
+      if (visited.find(node.get()) != visited.end()) {
+        node->Dominators = allReachableNodes;
+      } else {
+        // Unreachable nodes have empty dominator sets
+        node->Dominators.clear();
+      }
     }
   }
 
@@ -169,6 +227,12 @@ void CFGraph::calculateDominators() {
     MyBasicBlock* node = nodePtr.get();
     if (node == EntryBlock) 
       continue;
+
+    // Skip unreachable nodes - they have no immediate dominator
+    if (node->Dominators.empty()) {
+      node->IDom = nullptr;
+      continue;
+    }
 
     MyBasicBlock* closestDom = nullptr;
     size_t maxDomSize = 0;
@@ -335,7 +399,7 @@ void CFGraph::emitDot(const std::string &FilePath) const {
 // DOMTree Implementation
 // ============================================================================
 
-DOMTree::DOMTree(const CFGraph &CFG) {
+DOMTree::DOMTree(const CFGraph &CFG) : CFG(CFG) {
   // Phase 1: Initialize the map
   // We must add EVERY node as a key. If we only add parents, leaf nodes 
   // (nodes that dominate nothing) won't appear in the DOT graph output.
@@ -369,8 +433,8 @@ void DOMTree::emitDot(const std::string &FilePath) const {
   File << "  node [shape=box, style=\"rounded,filled\", fontname=\"Arial\", fontsize=12];\n";
   File << "  edge [color=\"#2E86AB\", penwidth=2, arrowsize=0.8];\n\n";
 
-  // Find the root node (node with no parent in the tree)
-  MyBasicBlock *Root = nullptr;
+  // Find the root node (The entry block that dominates itself)
+  MyBasicBlock *Root = CFG.EntryBlock;
   for (const auto &Entry : adjList) {
     bool hasParent = false;
     for (const auto &ParentEntry : adjList) {
@@ -390,33 +454,49 @@ void DOMTree::emitDot(const std::string &FilePath) const {
 
   // Emit all nodes with styling
   for (const auto &Entry : adjList) {
-    if (!Entry.first->getName().empty()) {
-      MyBasicBlock *Node = Entry.first;
-      std::string nodeColor;
-      std::string fontColor = "white";
-      std::string shape = "box";
-      
-      // Determine node type and color
-      if (Node == Root) {
-        // Root node (entry block)
-        nodeColor = "#06A77D";  // Teal green
-        shape = "box";
-      } else if (Entry.second.empty()) {
-        // Leaf nodes (nodes with no children)
-        nodeColor = "#D62246";  // Red
-      } else if (Entry.second.size() == 1) {
-        // Single child
-        nodeColor = "#4ECDC4";  // Light turquoise
-      } else {
-        // Multiple children (branch points in dom tree)
-        nodeColor = "#F77F00";  // Orange
-      }
-      
-      File << "  \"" << Node->getName() 
-           << "\" [fillcolor=\"" << nodeColor 
-           << "\", fontcolor=\"" << fontColor 
-           << "\", shape=" << shape << "];\n";
+    MyBasicBlock *Node = Entry.first;
+    if (!Node || Node->getName().empty()) {
+      errs() << "Warning: Skipping null or unnamed node in DOMTree\n";
+      continue;
     }
+    
+    const std::string &nodeName = Node->getName();
+    
+    // Validate that the name only contains printable ASCII characters
+    bool validName = true;
+    for (char c : nodeName) {
+      if (!std::isprint(static_cast<unsigned char>(c))) {
+        errs() << "Warning: Node has non-printable character in name, skipping\n";
+        validName = false;
+        break;
+      }
+    }
+    if (!validName) continue;
+    
+    std::string nodeColor;
+    std::string fontColor = "white";
+    std::string shape = "box";
+    
+    // Determine node type and color
+    if (Node == Root) {
+      // Root node (entry block)
+      nodeColor = "#06A77D";  // Teal green
+      shape = "box";
+    } else if (Entry.second.empty()) {
+      // Leaf nodes (nodes with no children)
+      nodeColor = "#D62246";  // Red
+    } else if (Entry.second.size() == 1) {
+      // Single child
+      nodeColor = "#4ECDC4";  // Light turquoise
+    } else {
+      // Multiple children (branch points in dom tree)
+      nodeColor = "#F77F00";  // Orange
+    }
+    
+    File << "  \"" << nodeName 
+         << "\" [fillcolor=\"" << nodeColor 
+         << "\", fontcolor=\"" << fontColor 
+         << "\", shape=" << shape << "];\n";
   }
   
   File << "\n";
@@ -424,15 +504,197 @@ void DOMTree::emitDot(const std::string &FilePath) const {
   // Emit edges with gradient styling
   for (const auto &Entry : adjList) {
     MyBasicBlock *Parent = Entry.first;
-    for (MyBasicBlock *Child : Entry.second) {
-      if (!Parent->getName().empty() && !Child->getName().empty()) {
-        File << "  \"" << Parent->getName() 
-             << "\" -> \"" << Child->getName() << "\";\n";
+    if (!Parent || Parent->getName().empty()) continue;
+    
+    const std::string &parentName = Parent->getName();
+    
+    // Validate parent name
+    bool validParentName = true;
+    for (char c : parentName) {
+      if (!std::isprint(static_cast<unsigned char>(c))) {
+        validParentName = false;
+        break;
       }
+    }
+    if (!validParentName) continue;
+    
+    for (MyBasicBlock *Child : Entry.second) {
+      if (!Child || Child->getName().empty()) continue;
+      
+      const std::string &childName = Child->getName();
+      
+      // Validate child name
+      bool validChildName = true;
+      for (char c : childName) {
+        if (!std::isprint(static_cast<unsigned char>(c))) {
+          validChildName = false;
+          break;
+        }
+      }
+      if (!validChildName) continue;
+      
+      File << "  \"" << parentName 
+           << "\" -> \"" << childName << "\";\n";
     }
   }
 
   File << "}\n";
+}
+
+bool DOMTree::verifyWithLLVM(const std::string &OutputDir) const {
+  // Get the function from the first block's BasicBlock reference
+  if (CFG.Blocks.empty()) {
+    errs() << "[VERIFY] No blocks in CFG\n";
+    return true;
+  }
+
+  Function *F = CFG.Blocks[0]->getBasicBlock()->getParent();
+  if (!F) {
+    errs() << "[VERIFY] ERROR: Cannot get Function from BasicBlock\n";
+    return false;
+  }
+
+  // Create README file in the parent directory of OutputDir
+  std::string ReadmePath = OutputDir;
+  if (ReadmePath.back() == '/') {
+    ReadmePath.pop_back();
+  }
+  // Go up one directory if we're in the 'dot' subdirectory
+  size_t lastSlash = ReadmePath.find_last_of('/');
+  if (lastSlash != std::string::npos && 
+      ReadmePath.substr(lastSlash + 1) == "dot") {
+    ReadmePath = ReadmePath.substr(0, lastSlash);
+  }
+  ReadmePath += "/VERIFICATION_REPORT.md";
+
+  // On first verification call, clear/create the file with header
+  if (!VerificationReportInitialized) {
+    std::error_code EC;
+    raw_fd_ostream InitFile(ReadmePath, EC);
+    if (!EC) {
+      InitFile << "# Dominator Tree Verification Report\n\n";
+      InitFile << "*Verification results for all analyzed functions*\n\n";
+      InitFile << "---\n\n";
+      InitFile.flush();
+      VerificationReportInitialized = true;
+    }
+  }
+  
+  std::error_code EC;
+  // Open in append mode to accumulate results from multiple functions
+  raw_fd_ostream File(ReadmePath, EC, sys::fs::OF_Append);
+
+  if (EC) {
+    errs() << "Error opening README file: " << EC.message() << "\n";
+    return false;
+  }
+
+  // Compute LLVM's dominator tree
+  DominatorTree LLVMDT(*F);
+  
+  bool allCorrect = true;
+  unsigned numBlocks = 0;
+  unsigned numMatches = 0;
+  unsigned numMismatches = 0;
+  std::vector<std::string> mismatchDetails;
+
+  // Verify each block and collect results
+  for (const auto &BlockPtr : CFG.Blocks) {
+    MyBasicBlock *MyBB = BlockPtr.get();
+    BasicBlock *BB = MyBB->getBasicBlock();
+    numBlocks++;
+
+    // Get immediate dominator from our implementation
+    MyBasicBlock *MyIDom = MyBB->getImmediateDominator();
+    
+    // Get immediate dominator from LLVM
+    DomTreeNode *LLVMNode = LLVMDT.getNode(BB);
+    BasicBlock *LLVMIDomBB = nullptr;
+    
+    if (LLVMNode && LLVMNode->getIDom()) {
+      LLVMIDomBB = LLVMNode->getIDom()->getBlock();
+    }
+
+    // Convert LLVM's immediate dominator BasicBlock to MyBasicBlock
+    MyBasicBlock *LLVMIDom = nullptr;
+    if (LLVMIDomBB) {
+      auto it = CFG.BBMap.find(LLVMIDomBB);
+      if (it != CFG.BBMap.end()) {
+        LLVMIDom = it->second;
+      }
+    }
+
+    // Compare results
+    bool match = (MyIDom == LLVMIDom);
+    
+    if (match) {
+      numMatches++;
+    } else {
+      numMismatches++;
+      allCorrect = false;
+      
+      std::string detail = "**" + MyBB->getName() + "**\n";
+      detail += "  - Custom IDom: ";
+      if (MyIDom) {
+        detail += MyIDom->getName();
+      } else {
+        detail += "(none)";
+      }
+      detail += "\n  - LLVM IDom: ";
+      if (LLVMIDom) {
+        detail += LLVMIDom->getName();
+      } else {
+        detail += "(none)";
+      }
+      mismatchDetails.push_back(detail);
+    }
+  }
+
+  // Write README in Markdown format
+  File << "## Function: `" << F->getName() << "`\n\n";
+  
+  File << "### Function Information\n\n";
+  File << "- **Total Basic Blocks**: " << numBlocks << "\n\n";
+  
+  File << "### Verification Results\n\n";
+  
+  if (allCorrect) {
+    File << "**Status**: ✅ PASSED\n\n";
+    File << "All immediate dominators computed by the custom implementation ";
+    File << "match LLVM's DominatorTree analysis.\n\n";
+  } else {
+    File << "**Status**: ❌ FAILED\n\n";
+    File << "Found discrepancies between custom implementation and LLVM's DominatorTree.\n\n";
+  }
+  
+  File << "### Summary Statistics\n\n";
+  File << "| Metric | Count |\n";
+  File << "|--------|-------|\n";
+  File << "| Total Blocks | " << numBlocks << " |\n";
+  File << "| Matches | " << numMatches << " |\n";
+  File << "| Mismatches | " << numMismatches << " |\n";
+  File << "| Success Rate | " << (numBlocks > 0 ? (numMatches * 100 / numBlocks) : 0) << "% |\n\n";
+  
+  if (!mismatchDetails.empty()) {
+    File << "### Detailed Mismatches\n\n";
+    for (const auto &detail : mismatchDetails) {
+      File << detail << "\n\n";
+    }
+  }
+  
+  File << "---\n\n";
+
+  File.flush();
+  
+  // Print minimal terminal output - just pass/fail status
+  if (allCorrect) {
+    errs() << "✓ Function '" << F->getName() << "': PASSED (" << numBlocks << " blocks verified)\n";
+  } else {
+    errs() << "✗ Function '" << F->getName() << "': FAILED (" << numMismatches << "/" << numBlocks 
+           << " mismatches - see " << ReadmePath << ")\n";
+  }
+  
+  return allCorrect;
 }
 
 // ============================================================================
@@ -443,27 +705,36 @@ PreservedAnalyses CFGDomAnalysisPass::run(
     Function &F,
     AnalysisManager<Function> &AM) {
 
-  errs() << ">>> CFGDomAnalysisPass::run() called for function: " 
-         << F.getName() << " <<<\n";
-  
+  // Always construct CFG and DOMTree regardless of flags
   CFGraph CFG(F);
+  DOMTree DomTree(CFG);
 
-  if (!CFG_DOT_FOLDER.empty()) {
-    std::string FileName = (CFG_DOT_FOLDER + "/" + F.getName().str() + ".dot");
-    errs() << "Emitting CFG DOT file for function '" << F.getName() 
-           << "' at: " << FileName << "\n";
+  // Check if result directory is specified
+  if (RESULT_DIR.empty()) {
+    errs() << "No output directory specified. Use -result-dir=<dir> to enable output generation\n";
+    return PreservedAnalyses::all();
+  }
+
+  // Emit CFG DOT file if requested
+  if (SHOW_CFG) {
+    std::string FileName = (RESULT_DIR + "/" + F.getName().str() + ".dot");
     CFG.emitDot(FileName);
+  }
 
-    if(EMIT_DOM_TREE) {
-      std::string DomFileName = (CFG_DOT_FOLDER + "/" + F.getName().str() + "_dom.dot");
-      errs() << "Emitting DOM Tree DOT file for function '" << F.getName() 
-             << "' at: " << DomFileName << "\n";
-      DOMTree DomTree(CFG);
-      DomTree.emitDot(DomFileName);
+  // Emit DOM tree DOT file if requested
+  if (SHOW_DOM_TREE) {
+    std::string DomFileName = (RESULT_DIR + "/" + F.getName().str() + "_dom.dot");
+    DomTree.emitDot(DomFileName);
+  }
+
+  // Generate verification report if requested
+  if (SHOW_REPORT) {
+    bool result = DomTree.verifyWithLLVM(RESULT_DIR);
+    if (!result) {
+      errs() << "Dominator Tree verification failed for function: " << F.getName() << "\n";
     }
   }
 
-  
   return PreservedAnalyses::all();
 }
 

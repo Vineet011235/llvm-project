@@ -29,6 +29,7 @@ public:
   MyBasicBlock(BasicBlock &BB);
 
   const std::string &getName() const { return Name; }
+  BasicBlock *getBasicBlock() const { return BBRef; }
   Instruction *getTerminator() const { return TerminatorInst; }
   const std::vector<Instruction *> &getInstructions() const {
     return BlockInstructions;
@@ -67,7 +68,7 @@ private:
   std::map<BasicBlock *, MyBasicBlock *> BBMap;
 
   MyBasicBlock* EntryBlock; // Track the entry point
-
+  Function *ParentFunction; // Track the parent function for verification
   // Helper methods
   void dfsPostOrder(MyBasicBlock* node, std::set<MyBasicBlock*>& visited, 
                     std::vector<MyBasicBlock*>& postOrder);
@@ -75,16 +76,18 @@ private:
 
 public:
   CFGraph(Function &F);
+  Function *getParentFunction() const { return ParentFunction; }
   void emitDot(const std::string &FilePath) const;
 };
 
 class DOMTree {
   // Key = Parent (Dominator), Value = Children (Dominated Nodes)
   std::map<MyBasicBlock*, std::vector<MyBasicBlock*>> adjList;
-
+  const CFGraph &CFG; // Store reference to CFGraph for verification
 public:
   DOMTree(const CFGraph &CFG);
   void emitDot(const std::string &FilePath) const;
+  bool verifyWithLLVM(const std::string &OutputDir) const; // Returns true if verification succeeds
 };
 
 } // namespace llvm

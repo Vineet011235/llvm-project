@@ -1,0 +1,9 @@
+digraph CFG {
+  node [shape=box, fontname="monospace", style=filled];
+  edge [penwidth=1.5];
+
+  BB_4 [label="BB_4\l2 instructions\l  %sum = add i32 %a, %b\l  ret i32 %sum\l", fillcolor="lightblue", fontcolor="black"];
+  BB_5 [label="BB_5\l2 instructions\l  %product = mul i32 %a, %b\l  ret i32 %product\l", fillcolor="lightgreen", fontcolor="black"];
+  BB_6 [label="BB_6\l2 instructions\l  %diff = sub i32 %a, %b\l  ret i32 %diff\l", fillcolor="lightgreen", fontcolor="black"];
+
+}
