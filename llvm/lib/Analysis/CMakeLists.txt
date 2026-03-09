@@ -62,6 +62,7 @@ add_llvm_component_library(LLVMAnalysis
   CodeMetrics.cpp
   ConstantFolding.cpp
   CtxProfAnalysis.cpp
+  CustomDataFlow.cpp
   CycleAnalysis.cpp
   DDG.cpp
   DDGPrinter.cpp
