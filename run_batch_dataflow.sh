@@ -18,6 +18,7 @@ INPUT_DIR=""
 OUTPUT_DIR="./test-result"  # Default centralized location
 ANALYSES="all"  # all | live | reach | avail | antic
 BUILD_IF_NEEDED=true
+DEBUG_MODE=false
 
 # ==============================
 # Usage
@@ -32,6 +33,7 @@ Required:
 Options:
   -o <dir>         Output base directory (default: ./test-result)
   -a <analyses>    Analyses to run: all|live|reach|avail|antic (default: all)
+  --debug          Enable debug mode (generate .log files with detailed output)
   --no-build       Skip automatic build check/build step
   -h               Show this help
 
@@ -51,6 +53,7 @@ Examples:
   $0 -d test                              # Process all files in test/ directory
   $0 -d test/simple -a live               # Run only live analysis
   $0 -d test -o ./my-results              # Custom output location
+  $0 -d test --debug                      # Enable debug mode with .log files
   $0 -d test --no-build                   # Skip build check
   
 Output Structure:
@@ -82,6 +85,10 @@ while [[ $# -gt 0 ]]; do
     -a)
       ANALYSES="$2"
       shift 2
+      ;;
+    --debug)
+      DEBUG_MODE=true
+      shift
       ;;
     --no-build)
       BUILD_IF_NEEDED=false
@@ -156,16 +163,22 @@ check_and_build() {
       mkdir -p "$LLVM_BUILD_DIR"
       
       echo "Running CMake configuration..."
-      cmake -S llvm -B "$LLVM_BUILD_DIR" \
+      if ! cmake -S llvm -B "$LLVM_BUILD_DIR" \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DLLVM_ENABLE_PROJECTS="clang" \
         -DLLVM_TARGETS_TO_BUILD="X86" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; then
+        echo "Error: CMake configuration failed"
+        exit 1
+      fi
     fi
     
     echo "Building LLVM (this may take a while)..."
-    cmake --build "$LLVM_BUILD_DIR" --target opt clang -j$(nproc)
+    if ! cmake --build "$LLVM_BUILD_DIR" --target opt clang -j$(nproc); then
+      echo "Error: Build failed"
+      exit 1
+    fi
     
     echo "Build completed successfully!"
     echo "========================================="
@@ -178,7 +191,6 @@ check_and_build() {
 # ==============================
 # Main execution
 # ==============================
-echo "Batch processing: $INPUT_DIR → $OUTPUT_DIR"
 
 # Build check
 if [[ "$BUILD_IF_NEEDED" == true ]]; then
@@ -192,8 +204,6 @@ if [[ ${#FILES[@]} -eq 0 ]]; then
   echo "Error: No C/C++ files found in $INPUT_DIR"
   exit 1
 fi
-
-echo "Found ${#FILES[@]} files"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -214,8 +224,14 @@ for file in "${FILES[@]}"; do
   # Create output directory maintaining structure
   FILE_OUTPUT="$OUTPUT_DIR/$FILE_DIR/${FILE_NAME}-dataflow"
   
+  # Build command with optional debug flag
+  CMD=("$SINGLE_RUNNER" -i "$file" -o "$FILE_OUTPUT" -a "$ANALYSES")
+  if [[ "$DEBUG_MODE" == true ]]; then
+    CMD+=(-d)
+  fi
+  
   # Run the single file analysis
-  if "$SINGLE_RUNNER" -i "$file" -o "$FILE_OUTPUT" -a "$ANALYSES" 2>/dev/null; then
+  if "${CMD[@]}" 2>/dev/null; then
     PROCESSED=$((PROCESSED + 1))
     PROCESSED_FILES+=("$file|$FILE_OUTPUT")
   else
@@ -234,6 +250,7 @@ MASTER_INDEX="$OUTPUT_DIR/INDEX.md"
   echo "- **Input Directory:** \`$INPUT_DIR\`"
   echo "- **Output Directory:** \`$OUTPUT_DIR\`"
   echo "- **Analyses:** $ANALYSES"
+  echo "- **Debug Mode:** $DEBUG_MODE"
   echo "- **Generated:** $(date '+%Y-%m-%d %H:%M:%S')"
   echo ""
   echo "## Summary"

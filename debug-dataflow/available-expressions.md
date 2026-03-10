@@ -1,3 +1,14 @@
+# Available Expressions Analysis Results
+
+- **Test:** `debug.cc`
+- **File:** `debug.cc`
+- **Generated:** 2026-03-10 14:26:12
+
+---
+
+## Source Code
+
+```cpp
 #include <iostream>
 
 int foo(int a, int b, bool cond) {
@@ -18,3 +29,12 @@ int main() {
     std::cin >> cond;
     return foo(a, b, cond);
 }
+
+```
+
+---
+
+## Analysis Output
+
+```
+```

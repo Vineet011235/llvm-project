@@ -1,0 +1,119 @@
+==================================
+Debug mode enabled
+Log file: ./debug-dataflow/debug.log
+Timestamp: 2026-03-10 14:26:07
+==================================
+
+Processing: debug.cc
+✓ Complete → ./debug-dataflow
+ ---
+➕ Arg : a
+➕ Arg : b
+➕ Arg : cond
+---------
+Value to Index Mapping:
+    %x.0 = add nsw i32 %a.b, 1, !dbg !849 -> 3
+  i32 %b -> 1
+  i32 %a -> 0
+    %a.b = select i1 %cond, i32 %a, i32 %b -> 4
+  i1 %cond -> 2
+🥹 Processing BB: entry
+  👀 Processing Instruction :   %a.b = select i1 %cond, i32 %a, i32 %b
+   ➕ Adding to GEN: %cond
+   ➕ Adding to GEN: %a
+   ➕ Adding to GEN: %b
+   ➕ Adding to KILL: %a.b
+  👀 Processing Instruction :   %x.0 = add nsw i32 %a.b, 1, !dbg !849
+   ⚠️  Operand is killed in the same block, not adding to GEN: %a.b
+   ❌ Operand not in domain: 1
+   ➕ Adding to KILL: %x.0
+  👀 Processing Instruction :   ret i32 %x.0, !dbg !851
+   ⚠️  Operand is killed in the same block, not adding to GEN: %x.0
+
+BB: entry
+  GEN: { %a, %b, %cond }
+  KILL: { %x.0, %a.b }
+0 -> %a
+1 -> %b
+2 -> %cond
+3 -> %x.0
+4 -> %a.b
+
+--- Iteration 1 ---
+
+Processing BB: entry
+  Current IN: BitVector: |00000
+  Current OUT: BitVector: |00000
+  GEN: BitVector: |11100
+  KILL: BitVector: |00011
+  Updated IN: BitVector: |11100
+  Updated OUT: BitVector: |00000
+
+--- Iteration 2 ---
+
+Processing BB: entry
+  Current IN: BitVector: |11100
+  Current OUT: BitVector: |00000
+  GEN: BitVector: |11100
+  KILL: BitVector: |00011
+  No change in IN/OUT.
+--- Running Live Variable Analysis ---
+---------
+Value to Index Mapping:
+    %loadedv = trunc nuw i8 %0 to i1, !dbg !866 -> 4
+    %x.0.i = select i1 %loadedv, i32 6, i32 11, !dbg !881 -> 3
+    %call.i = call noundef nonnull align 8 dereferenceable(16) ptr @_ZNSi10_M_extractIbEERSiRT_(ptr noundef nonnull align 8 dereferenceable(16) @_ZSt3cin, ptr noundef nonnull align 1 dereferenceable(1) %cond), !dbg !865 -> 1
+    %cond = alloca i8, align 1, !DIAssignID !845 -> 0
+    %0 = load i8, ptr %cond, align 1, !dbg !866, !tbaa !867, !range !869, !noundef !870 -> 2
+🥹 Processing BB: entry
+  👀 Processing Instruction :   %cond = alloca i8, align 1, !DIAssignID !845
+   ❌ Operand not in domain: 1
+   ➕ Adding to KILL: %cond
+  👀 Processing Instruction :   call void @llvm.lifetime.start.p0(ptr nonnull %cond) #4, !dbg !847
+   ⚠️  Operand is killed in the same block, not adding to GEN: %cond
+   ❌ Operand not in domain: @llvm.lifetime.start.p0
+  👀 Processing Instruction :   %call.i = call noundef nonnull align 8 dereferenceable(16) ptr @_ZNSi10_M_extractIbEERSiRT_(ptr noundef nonnull align 8 dereferenceable(16) @_ZSt3cin, ptr noundef nonnull align 1 dereferenceable(1) %cond), !dbg !865
+   ❌ Operand not in domain: @_ZSt3cin
+   ⚠️  Operand is killed in the same block, not adding to GEN: %cond
+   ❌ Operand not in domain: @_ZNSi10_M_extractIbEERSiRT_
+   ➕ Adding to KILL: %call.i
+  👀 Processing Instruction :   %0 = load i8, ptr %cond, align 1, !dbg !866, !tbaa !867, !range !869, !noundef !870
+   ⚠️  Operand is killed in the same block, not adding to GEN: %cond
+   ➕ Adding to KILL: %0
+  👀 Processing Instruction :   %loadedv = trunc nuw i8 %0 to i1, !dbg !866
+   ⚠️  Operand is killed in the same block, not adding to GEN: %0
+   ➕ Adding to KILL: %loadedv
+  👀 Processing Instruction :   %x.0.i = select i1 %loadedv, i32 6, i32 11, !dbg !881
+   ⚠️  Operand is killed in the same block, not adding to GEN: %loadedv
+   ❌ Operand not in domain: 6
+   ❌ Operand not in domain: 11
+   ➕ Adding to KILL: %x.0.i
+  👀 Processing Instruction :   call void @llvm.lifetime.end.p0(ptr nonnull %cond) #4, !dbg !883
+   ⚠️  Operand is killed in the same block, not adding to GEN: %cond
+   ❌ Operand not in domain: @llvm.lifetime.end.p0
+  👀 Processing Instruction :   ret i32 %x.0.i, !dbg !884
+   ⚠️  Operand is killed in the same block, not adding to GEN: %x.0.i
+
+BB: entry
+  GEN: {    }
+  KILL: { %cond, %call.i, %0, %x.0.i, %loadedv }
+0 -> %cond
+1 -> %call.i
+2 -> %0
+3 -> %x.0.i
+4 -> %loadedv
+
+--- Iteration 1 ---
+
+Processing BB: entry
+  Current IN: BitVector: |00000
+  Current OUT: BitVector: |00000
+  GEN: BitVector: |00000
+  KILL: BitVector: |11111
+  No change in IN/OUT.
+--- Running Reaching Definitions ---
+--- Running Reaching Definitions ---
+--- Running Available Expressions ---
+--- Running Available Expressions ---
+--- Running Anticipable Expressions ---
+--- Running Anticipable Expressions ---

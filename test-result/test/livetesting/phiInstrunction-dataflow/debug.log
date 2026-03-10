@@ -1,0 +1,178 @@
+==================================
+Debug mode enabled
+Log file: ./test-result/test/livetesting/phiInstrunction-dataflow/debug.log
+Timestamp: 2026-03-10 13:52:05
+==================================
+
+Processing: test/livetesting/phiInstrunction.cc
+✓ Complete → ./test-result/test/livetesting/phiInstrunction-dataflow
+ align 4
+🤔 Ins :   %x = alloca i32, align 4
+🤔 Ins :   %y = alloca i32, align 4
+🤔 Ins :   store i32 0, ptr %retval, align 4
+➕ Op:   %retval = alloca i32, align 4
+🤔 Ins :   store i32 10, ptr %x, align 4, !dbg !15
+➕ Op:   %x = alloca i32, align 4
+🤔 Ins :   %0 = load i32, ptr %x, align 4, !dbg !18
+➕ Op:   %x = alloca i32, align 4
+🤔 Ins :   %cmp = icmp sgt i32 %0, 0, !dbg !20
+➕ Op:   %0 = load i32, ptr %x, align 4, !dbg !18
+🤔 Ins :   br i1 %cmp, label %if.then, label %if.else, !dbg !20
+➕ Op:   %cmp = icmp sgt i32 %0, 0, !dbg !20
+---------
+🤔 Ins :   store i32 1, ptr %y, align 4, !dbg !21
+➕ Op:   %y = alloca i32, align 4
+🤔 Ins :   br label %if.end, !dbg !22
+---------
+🤔 Ins :   store i32 2, ptr %y, align 4, !dbg !23
+➕ Op:   %y = alloca i32, align 4
+🤔 Ins :   br label %if.end
+---------
+🤔 Ins :   %1 = load i32, ptr %y, align 4, !dbg !24
+➕ Op:   %y = alloca i32, align 4
+🤔 Ins :   ret i32 %1, !dbg !25
+➕ Op:   %1 = load i32, ptr %y, align 4, !dbg !24
+---------
+Value to Index Mapping:
+    %x = alloca i32, align 4 -> 1
+    %cmp = icmp sgt i32 %0, 0, !dbg !20 -> 3
+    %1 = load i32, ptr %y, align 4, !dbg !24 -> 5
+    %retval = alloca i32, align 4 -> 0
+    %0 = load i32, ptr %x, align 4, !dbg !18 -> 4
+    %y = alloca i32, align 4 -> 2
+🥹 Processing BB: entry
+  👀 Processing Ins:   %retval = alloca i32, align 4
+   ➕ Adding to KILL: %retval
+  --
+  👀 Processing Ins:   %x = alloca i32, align 4
+   ➕ Adding to KILL: %x
+  --
+  👀 Processing Ins:   %y = alloca i32, align 4
+   ➕ Adding to KILL: %y
+  --
+  👀 Processing Ins:   store i32 0, ptr %retval, align 4
+   ❌ Not adding to GEN (not upward exposed): %retval
+  --
+  👀 Processing Ins:   store i32 10, ptr %x, align 4, !dbg !15
+   ❌ Not adding to GEN (not upward exposed): %x
+  --
+  👀 Processing Ins:   %0 = load i32, ptr %x, align 4, !dbg !18
+   ❌ Not adding to GEN (not upward exposed): %x
+   ➕ Adding to KILL: %0
+  --
+  👀 Processing Ins:   %cmp = icmp sgt i32 %0, 0, !dbg !20
+   ❌ Not adding to GEN (not upward exposed): %0
+   ➕ Adding to KILL: %cmp
+  --
+  👀 Processing Ins:   br i1 %cmp, label %if.then, label %if.else, !dbg !20
+   ❌ Not adding to GEN (not upward exposed): %cmp
+   ❌ Instruction not in domain (should not happen):   br i1 %cmp, label %if.then, label %if.else, !dbg !20
+🥹 Processing BB: if.then
+  👀 Processing Ins:   store i32 1, ptr %y, align 4, !dbg !21
+   ➕ Adding to GEN: %y
+  --
+  👀 Processing Ins:   br label %if.end, !dbg !22
+   ❌ Instruction not in domain (should not happen):   br label %if.end, !dbg !22
+🥹 Processing BB: if.else
+  👀 Processing Ins:   store i32 2, ptr %y, align 4, !dbg !23
+   ➕ Adding to GEN: %y
+  --
+  👀 Processing Ins:   br label %if.end
+   ❌ Instruction not in domain (should not happen):   br label %if.end
+🥹 Processing BB: if.end
+  👀 Processing Ins:   %1 = load i32, ptr %y, align 4, !dbg !24
+   ➕ Adding to GEN: %y
+   ➕ Adding to KILL: %1
+  --
+  👀 Processing Ins:   ret i32 %1, !dbg !25
+   ❌ Not adding to GEN (not upward exposed): %1
+   ❌ Instruction not in domain (should not happen):   ret i32 %1, !dbg !25
+
+BB: entry
+  GEN: {    }
+  KILL: { %retval, %x, %y, %cmp, %0 }
+
+BB: if.then
+  GEN: { %y }
+  KILL: {    }
+
+BB: if.else
+  GEN: { %y }
+  KILL: {    }
+
+BB: if.end
+  GEN: { %y }
+  KILL: { %1 }
+0 -> %retval
+1 -> %x
+2 -> %y
+3 -> %cmp
+4 -> %0
+5 -> %1
+
+--- Iteration 1 ---
+
+Processing BB: if.end
+  Current IN: BitVector: |000000
+  Current OUT: BitVector: |000000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000001
+  Updated IN: BitVector: |001000
+  Updated OUT: BitVector: |000000
+
+Processing BB: if.then
+  Current IN: BitVector: |000000
+  Current OUT: BitVector: |000000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000000
+  Updated IN: BitVector: |001000
+  Updated OUT: BitVector: |001000
+
+Processing BB: if.else
+  Current IN: BitVector: |000000
+  Current OUT: BitVector: |000000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000000
+  Updated IN: BitVector: |001000
+  Updated OUT: BitVector: |001000
+
+Processing BB: entry
+  Current IN: BitVector: |000000
+  Current OUT: BitVector: |000000
+  GEN: BitVector: |000000
+  KILL: BitVector: |111110
+  Updated IN: BitVector: |000000
+  Updated OUT: BitVector: |001000
+
+--- Iteration 2 ---
+
+Processing BB: if.end
+  Current IN: BitVector: |001000
+  Current OUT: BitVector: |000000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000001
+  No change in IN/OUT.
+
+Processing BB: if.then
+  Current IN: BitVector: |001000
+  Current OUT: BitVector: |001000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000000
+  No change in IN/OUT.
+
+Processing BB: if.else
+  Current IN: BitVector: |001000
+  Current OUT: BitVector: |001000
+  GEN: BitVector: |001000
+  KILL: BitVector: |000000
+  No change in IN/OUT.
+
+Processing BB: entry
+  Current IN: BitVector: |000000
+  Current OUT: BitVector: |001000
+  GEN: BitVector: |000000
+  KILL: BitVector: |111110
+  No change in IN/OUT.
+--- Running Reaching Definitions ---
+--- Running Available Expressions ---
+--- Running Anticipable Expressions ---

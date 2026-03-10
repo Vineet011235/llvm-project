@@ -78,7 +78,6 @@ done
 if [[ -z "$INPUT_FILE" ]]; then
   # Default mode: use debug.cc in current directory
   INPUT_FILE="debug.cc"
-  echo "No input file specified, using default: $INPUT_FILE"
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -106,7 +105,8 @@ mkdir -p "$OUTPUT_DIR"
 # Setup debug log if debug mode enabled
 if [[ "$DEBUG_MODE" == true ]]; then
   LOG_FILE="$OUTPUT_DIR/debug.log"
-  exec > >(tee -a "$LOG_FILE") 2>&1
+  > "$LOG_FILE"  # Clear the log file
+  exec > >(tee "$LOG_FILE") 2>&1
   echo "=================================="
   echo "Debug mode enabled"
   echo "Log file: $LOG_FILE"
@@ -130,21 +130,38 @@ if [[ ! -f "$OPT_BIN" ]]; then
   exit 1
 fi
 
+# Check if CustomDataFlow.cpp is newer than opt binary
+DATAFLOW_SOURCE="llvm/lib/Analysis/CustomDataFlow.cpp"
+if [[ -f "$DATAFLOW_SOURCE" ]] && [[ "$DATAFLOW_SOURCE" -nt "$OPT_BIN" ]]; then
+  echo "CustomDataFlow.cpp modified, rebuilding opt..."
+  if ! cmake --build "$LLVM_BUILD_DIR" --target opt -j$(nproc) > /dev/null 2>&1; then
+    echo "Error: Build failed"
+    exit 1
+  fi
+  echo "Build complete"
+fi
+
 # ==============================
 # Main analysis
 # ==============================
 BASENAME=$(basename "$INPUT_FILE")
 NAME="${BASENAME%.*}"
 
-echo "Processing: $INPUT_FILE"
+[[ "$DEBUG_MODE" == true ]] && echo "Processing: $INPUT_FILE"
 
 # Step 1: Compile to LLVM IR
 IR_FILE="$OUTPUT_DIR/$NAME.ll"
 
 if [[ "$INPUT_FILE" == *.cpp || "$INPUT_FILE" == *.cc ]]; then
-  "$CLANG_BIN" $CFLAGS -S -emit-llvm -x c++ "$INPUT_FILE" -o "$IR_FILE" 2>/dev/null
+  if ! "$CLANG_BIN" $CFLAGS -S -emit-llvm -x c++ "$INPUT_FILE" -o "$IR_FILE" 2>&1; then
+    echo "Error: Compilation failed for $INPUT_FILE"
+    exit 1
+  fi
 else
-  "$CLANG_BIN" $CFLAGS -S -emit-llvm "$INPUT_FILE" -o "$IR_FILE" 2>/dev/null
+  if ! "$CLANG_BIN" $CFLAGS -S -emit-llvm "$INPUT_FILE" -o "$IR_FILE" 2>&1; then
+    echo "Error: Compilation failed for $INPUT_FILE"
+    exit 1
+  fi
 fi
 
 # Step 2: Run dataflow analyses
@@ -190,7 +207,11 @@ if [[ "$RUN_LIVE" == true ]]; then
     echo "## Analysis Output"
     echo ""
     echo '```'
-    "$OPT_BIN" -passes="custom-dataflow" -df-live -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    if [[ "$DEBUG_MODE" == true ]]; then
+      "$OPT_BIN" -passes="custom-dataflow" -df-live -df-debug -disable-output "$IR_FILE" 2>> "$LOG_FILE" || echo "Analysis completed with warnings"
+    else
+      "$OPT_BIN" -passes="custom-dataflow" -df-live -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    fi
     echo '```'
   } > "$LIVE_OUT"
 fi
@@ -219,7 +240,11 @@ if [[ "$RUN_REACH" == true ]]; then
     echo "## Analysis Output"
     echo ""
     echo '```'
-    "$OPT_BIN" -passes="custom-dataflow" -df-reach -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    if [[ "$DEBUG_MODE" == true ]]; then
+      "$OPT_BIN" -passes="custom-dataflow" -df-reach -df-debug -disable-output "$IR_FILE" 2>> "$LOG_FILE" || echo "Analysis completed with warnings"
+    else
+      "$OPT_BIN" -passes="custom-dataflow" -df-reach -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    fi
     echo '```'
   } > "$REACH_OUT"
 fi
@@ -248,7 +273,11 @@ if [[ "$RUN_AVAIL" == true ]]; then
     echo "## Analysis Output"
     echo ""
     echo '```'
-    "$OPT_BIN" -passes="custom-dataflow" -df-avail -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    if [[ "$DEBUG_MODE" == true ]]; then
+      "$OPT_BIN" -passes="custom-dataflow" -df-avail -df-debug -disable-output "$IR_FILE" 2>> "$LOG_FILE" || echo "Analysis completed with warnings"
+    else
+      "$OPT_BIN" -passes="custom-dataflow" -df-avail -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    fi
     echo '```'
   } > "$AVAIL_OUT"
 fi
@@ -277,7 +306,11 @@ if [[ "$RUN_ANTIC" == true ]]; then
     echo "## Analysis Output"
     echo ""
     echo '```'
-    "$OPT_BIN" -passes="custom-dataflow" -df-antic -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    if [[ "$DEBUG_MODE" == true ]]; then
+      "$OPT_BIN" -passes="custom-dataflow" -df-antic -df-debug -disable-output "$IR_FILE" 2>> "$LOG_FILE" || echo "Analysis completed with warnings"
+    else
+      "$OPT_BIN" -passes="custom-dataflow" -df-antic -disable-output "$IR_FILE" 2>&1 || echo "Analysis completed with warnings"
+    fi
     echo '```'
   } > "$ANTIC_OUT"
 fi

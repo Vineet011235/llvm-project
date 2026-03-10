@@ -1,0 +1,396 @@
+==================================
+Debug mode enabled
+Log file: ./test-result/test/livetesting/loop-dataflow/debug.log
+Timestamp: 2026-03-10 13:52:05
+==================================
+
+Processing: test/livetesting/loop.cc
+✓ Complete → ./test-result/test/livetesting/loop-dataflow
+
+🤔 Ins :   %a.addr = alloca i32, align 4
+🤔 Ins :   %b.addr = alloca i32, align 4
+🤔 Ins :   %sum = alloca i32, align 4
+🤔 Ins :   %i = alloca i32, align 4
+🤔 Ins :   store i32 %a, ptr %a.addr, align 4
+➕ Op: i32 %a
+➕ Op:   %a.addr = alloca i32, align 4
+🤔 Ins :   store i32 %b, ptr %b.addr, align 4
+➕ Op: i32 %b
+➕ Op:   %b.addr = alloca i32, align 4
+🤔 Ins :   %0 = load i32, ptr %a.addr, align 4, !dbg !20
+➕ Op:   %a.addr = alloca i32, align 4
+🤔 Ins :   store i32 %0, ptr %sum, align 4, !dbg !19
+➕ Op:   %0 = load i32, ptr %a.addr, align 4, !dbg !20
+➕ Op:   %sum = alloca i32, align 4
+🤔 Ins :   store i32 0, ptr %i, align 4, !dbg !22
+➕ Op:   %i = alloca i32, align 4
+🤔 Ins :   br label %while.cond, !dbg !23
+---------
+🤔 Ins :   %1 = load i32, ptr %i, align 4, !dbg !24
+➕ Op:   %i = alloca i32, align 4
+🤔 Ins :   %2 = load i32, ptr %b.addr, align 4, !dbg !25
+➕ Op:   %b.addr = alloca i32, align 4
+🤔 Ins :   %cmp = icmp slt i32 %1, %2, !dbg !26
+➕ Op:   %1 = load i32, ptr %i, align 4, !dbg !24
+➕ Op:   %2 = load i32, ptr %b.addr, align 4, !dbg !25
+🤔 Ins :   br i1 %cmp, label %while.body, label %while.end, !dbg !23
+➕ Op:   %cmp = icmp slt i32 %1, %2, !dbg !26
+---------
+🤔 Ins :   %3 = load i32, ptr %sum, align 4, !dbg !27
+➕ Op:   %sum = alloca i32, align 4
+🤔 Ins :   %4 = load i32, ptr %i, align 4, !dbg !29
+➕ Op:   %i = alloca i32, align 4
+🤔 Ins :   %add = add nsw i32 %3, %4, !dbg !30
+➕ Op:   %3 = load i32, ptr %sum, align 4, !dbg !27
+➕ Op:   %4 = load i32, ptr %i, align 4, !dbg !29
+🤔 Ins :   store i32 %add, ptr %sum, align 4, !dbg !31
+➕ Op:   %add = add nsw i32 %3, %4, !dbg !30
+➕ Op:   %sum = alloca i32, align 4
+🤔 Ins :   %5 = load i32, ptr %i, align 4, !dbg !32
+➕ Op:   %i = alloca i32, align 4
+🤔 Ins :   %inc = add nsw i32 %5, 1, !dbg !32
+➕ Op:   %5 = load i32, ptr %i, align 4, !dbg !32
+🤔 Ins :   store i32 %inc, ptr %i, align 4, !dbg !32
+➕ Op:   %inc = add nsw i32 %5, 1, !dbg !32
+➕ Op:   %i = alloca i32, align 4
+🤔 Ins :   br label %while.cond, !dbg !23, !llvm.loop !33
+---------
+🤔 Ins :   %6 = load i32, ptr %sum, align 4, !dbg !36
+➕ Op:   %sum = alloca i32, align 4
+🤔 Ins :   ret i32 %6, !dbg !37
+➕ Op:   %6 = load i32, ptr %sum, align 4, !dbg !36
+---------
+Value to Index Mapping:
+    %3 = load i32, ptr %sum, align 4, !dbg !27 -> 12
+    %2 = load i32, ptr %b.addr, align 4, !dbg !25 -> 11
+    %0 = load i32, ptr %a.addr, align 4, !dbg !20 -> 9
+    %i = alloca i32, align 4 -> 6
+    %inc = add nsw i32 %5, 1, !dbg !32 -> 3
+    %sum = alloca i32, align 4 -> 7
+    %4 = load i32, ptr %i, align 4, !dbg !29 -> 13
+  i32 %a -> 0
+    %cmp = icmp slt i32 %1, %2, !dbg !26 -> 8
+    %1 = load i32, ptr %i, align 4, !dbg !24 -> 10
+  i32 %b -> 1
+    %b.addr = alloca i32, align 4 -> 5
+    %5 = load i32, ptr %i, align 4, !dbg !32 -> 14
+    %6 = load i32, ptr %sum, align 4, !dbg !36 -> 15
+    %add = add nsw i32 %3, %4, !dbg !30 -> 2
+    %a.addr = alloca i32, align 4 -> 4
+🥹 Processing BB: entry
+  👀 Processing Ins:   %a.addr = alloca i32, align 4
+   ➕ Adding to KILL: %a.addr
+  --
+  👀 Processing Ins:   %b.addr = alloca i32, align 4
+   ➕ Adding to KILL: %b.addr
+  --
+  👀 Processing Ins:   %sum = alloca i32, align 4
+   ➕ Adding to KILL: %sum
+  --
+  👀 Processing Ins:   %i = alloca i32, align 4
+   ➕ Adding to KILL: %i
+  --
+  👀 Processing Ins:   store i32 %a, ptr %a.addr, align 4
+   ➕ Adding to GEN: %a
+   ❌ Not adding to GEN (not upward exposed): %a.addr
+  --
+  👀 Processing Ins:   store i32 %b, ptr %b.addr, align 4
+   ➕ Adding to GEN: %b
+   ❌ Not adding to GEN (not upward exposed): %b.addr
+  --
+  👀 Processing Ins:   %0 = load i32, ptr %a.addr, align 4, !dbg !20
+   ❌ Not adding to GEN (not upward exposed): %a.addr
+   ➕ Adding to KILL: %0
+  --
+  👀 Processing Ins:   store i32 %0, ptr %sum, align 4, !dbg !19
+   ❌ Not adding to GEN (not upward exposed): %0
+   ❌ Not adding to GEN (not upward exposed): %sum
+  --
+  👀 Processing Ins:   store i32 0, ptr %i, align 4, !dbg !22
+   ❌ Not adding to GEN (not upward exposed): %i
+  --
+  👀 Processing Ins:   br label %while.cond, !dbg !23
+   ❌ Instruction not in domain (should not happen):   br label %while.cond, !dbg !23
+🥹 Processing BB: while.cond
+  👀 Processing Ins:   %1 = load i32, ptr %i, align 4, !dbg !24
+   ➕ Adding to GEN: %i
+   ➕ Adding to KILL: %1
+  --
+  👀 Processing Ins:   %2 = load i32, ptr %b.addr, align 4, !dbg !25
+   ➕ Adding to GEN: %b.addr
+   ➕ Adding to KILL: %2
+  --
+  👀 Processing Ins:   %cmp = icmp slt i32 %1, %2, !dbg !26
+   ❌ Not adding to GEN (not upward exposed): %1
+   ❌ Not adding to GEN (not upward exposed): %2
+   ➕ Adding to KILL: %cmp
+  --
+  👀 Processing Ins:   br i1 %cmp, label %while.body, label %while.end, !dbg !23
+   ❌ Not adding to GEN (not upward exposed): %cmp
+   ❌ Instruction not in domain (should not happen):   br i1 %cmp, label %while.body, label %while.end, !dbg !23
+🥹 Processing BB: while.body
+  👀 Processing Ins:   %3 = load i32, ptr %sum, align 4, !dbg !27
+   ➕ Adding to GEN: %sum
+   ➕ Adding to KILL: %3
+  --
+  👀 Processing Ins:   %4 = load i32, ptr %i, align 4, !dbg !29
+   ➕ Adding to GEN: %i
+   ➕ Adding to KILL: %4
+  --
+  👀 Processing Ins:   %add = add nsw i32 %3, %4, !dbg !30
+   ❌ Not adding to GEN (not upward exposed): %3
+   ❌ Not adding to GEN (not upward exposed): %4
+   ➕ Adding to KILL: %add
+  --
+  👀 Processing Ins:   store i32 %add, ptr %sum, align 4, !dbg !31
+   ❌ Not adding to GEN (not upward exposed): %add
+   ➕ Adding to GEN: %sum
+  --
+  👀 Processing Ins:   %5 = load i32, ptr %i, align 4, !dbg !32
+   ➕ Adding to GEN: %i
+   ➕ Adding to KILL: %5
+  --
+  👀 Processing Ins:   %inc = add nsw i32 %5, 1, !dbg !32
+   ❌ Not adding to GEN (not upward exposed): %5
+   ➕ Adding to KILL: %inc
+  --
+  👀 Processing Ins:   store i32 %inc, ptr %i, align 4, !dbg !32
+   ❌ Not adding to GEN (not upward exposed): %inc
+   ➕ Adding to GEN: %i
+  --
+  👀 Processing Ins:   br label %while.cond, !dbg !23, !llvm.loop !33
+   ❌ Instruction not in domain (should not happen):   br label %while.cond, !dbg !23, !llvm.loop !33
+🥹 Processing BB: while.end
+  👀 Processing Ins:   %6 = load i32, ptr %sum, align 4, !dbg !36
+   ➕ Adding to GEN: %sum
+   ➕ Adding to KILL: %6
+  --
+  👀 Processing Ins:   ret i32 %6, !dbg !37
+   ❌ Not adding to GEN (not upward exposed): %6
+   ❌ Instruction not in domain (should not happen):   ret i32 %6, !dbg !37
+
+BB: entry
+  GEN: { %a, %b }
+  KILL: { %a.addr, %b.addr, %i, %sum, %0 }
+
+BB: while.cond
+  GEN: { %b.addr, %i }
+  KILL: { %cmp, %1, %2 }
+
+BB: while.body
+  GEN: { %i, %sum }
+  KILL: { %add, %inc, %3, %4, %5 }
+
+BB: while.end
+  GEN: { %sum }
+  KILL: { %6 }
+0 -> %a
+1 -> %b
+2 -> %add
+3 -> %inc
+4 -> %a.addr
+5 -> %b.addr
+6 -> %i
+7 -> %sum
+8 -> %cmp
+9 -> %0
+10 -> %1
+11 -> %2
+12 -> %3
+13 -> %4
+14 -> %5
+15 -> %6
+
+--- Iteration 1 ---
+
+Processing BB: while.body
+  Current IN: BitVector: |0000000000000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000001100000000
+  KILL: BitVector: |0011000000001110
+  Updated IN: BitVector: |0000001100000000
+  Updated OUT: BitVector: |0000000000000000
+
+Processing BB: while.end
+  Current IN: BitVector: |0000000000000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000000100000000
+  KILL: BitVector: |0000000000000001
+  Updated IN: BitVector: |0000000100000000
+  Updated OUT: BitVector: |0000000000000000
+
+Processing BB: while.cond
+  Current IN: BitVector: |0000000000000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000011000000000
+  KILL: BitVector: |0000000010110000
+  Updated IN: BitVector: |0000011000000000
+  Updated OUT: BitVector: |0000001100000000
+
+Processing BB: entry
+  Current IN: BitVector: |0000000000000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |1100000000000000
+  KILL: BitVector: |0000111101000000
+  Updated IN: BitVector: |1100000000000000
+  Updated OUT: BitVector: |0000011000000000
+
+--- Iteration 2 ---
+
+Processing BB: while.body
+  Current IN: BitVector: |0000001100000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000001100000000
+  KILL: BitVector: |0011000000001110
+  Updated IN: BitVector: |0000001100000000
+  Updated OUT: BitVector: |0000011000000000
+
+Processing BB: while.end
+  Current IN: BitVector: |0000000100000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000000100000000
+  KILL: BitVector: |0000000000000001
+  No change in IN/OUT.
+
+Processing BB: while.cond
+  Current IN: BitVector: |0000011000000000
+  Current OUT: BitVector: |0000001100000000
+  GEN: BitVector: |0000011000000000
+  KILL: BitVector: |0000000010110000
+  Updated IN: BitVector: |0000011100000000
+  Updated OUT: BitVector: |0000001100000000
+
+Processing BB: entry
+  Current IN: BitVector: |1100000000000000
+  Current OUT: BitVector: |0000011000000000
+  GEN: BitVector: |1100000000000000
+  KILL: BitVector: |0000111101000000
+  Updated IN: BitVector: |1100000000000000
+  Updated OUT: BitVector: |0000011100000000
+
+--- Iteration 3 ---
+
+Processing BB: while.body
+  Current IN: BitVector: |0000001100000000
+  Current OUT: BitVector: |0000011000000000
+  GEN: BitVector: |0000001100000000
+  KILL: BitVector: |0011000000001110
+  Updated IN: BitVector: |0000011100000000
+  Updated OUT: BitVector: |0000011100000000
+
+Processing BB: while.end
+  Current IN: BitVector: |0000000100000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000000100000000
+  KILL: BitVector: |0000000000000001
+  No change in IN/OUT.
+
+Processing BB: while.cond
+  Current IN: BitVector: |0000011100000000
+  Current OUT: BitVector: |0000001100000000
+  GEN: BitVector: |0000011000000000
+  KILL: BitVector: |0000000010110000
+  Updated IN: BitVector: |0000011100000000
+  Updated OUT: BitVector: |0000011100000000
+
+Processing BB: entry
+  Current IN: BitVector: |1100000000000000
+  Current OUT: BitVector: |0000011100000000
+  GEN: BitVector: |1100000000000000
+  KILL: BitVector: |0000111101000000
+  No change in IN/OUT.
+
+--- Iteration 4 ---
+
+Processing BB: while.body
+  Current IN: BitVector: |0000011100000000
+  Current OUT: BitVector: |0000011100000000
+  GEN: BitVector: |0000001100000000
+  KILL: BitVector: |0011000000001110
+  No change in IN/OUT.
+
+Processing BB: while.end
+  Current IN: BitVector: |0000000100000000
+  Current OUT: BitVector: |0000000000000000
+  GEN: BitVector: |0000000100000000
+  KILL: BitVector: |0000000000000001
+  No change in IN/OUT.
+
+Processing BB: while.cond
+  Current IN: BitVector: |0000011100000000
+  Current OUT: BitVector: |0000011100000000
+  GEN: BitVector: |0000011000000000
+  KILL: BitVector: |0000000010110000
+  No change in IN/OUT.
+
+Processing BB: entry
+  Current IN: BitVector: |1100000000000000
+  Current OUT: BitVector: |0000011100000000
+  GEN: BitVector: |1100000000000000
+  KILL: BitVector: |0000111101000000
+  No change in IN/OUT.
+--- Running Live Variable Analysis ---
+🤔 Ins :   %retval = alloca i32, align 4
+🤔 Ins :   %result = alloca i32, align 4
+🤔 Ins :   store i32 0, ptr %retval, align 4
+➕ Op:   %retval = alloca i32, align 4
+🤔 Ins :   %call = call noundef i32 @_Z16loop_stress_testii(i32 noundef 5, i32 noundef 10), !dbg !16
+🤔 Ins :   store i32 %call, ptr %result, align 4, !dbg !15
+➕ Op:   %call = call noundef i32 @_Z16loop_stress_testii(i32 noundef 5, i32 noundef 10), !dbg !16
+➕ Op:   %result = alloca i32, align 4
+🤔 Ins :   ret i32 0, !dbg !17
+---------
+Value to Index Mapping:
+    %call = call noundef i32 @_Z16loop_stress_testii(i32 noundef 5, i32 noundef 10), !dbg !16 -> 2
+    %result = alloca i32, align 4 -> 0
+    %retval = alloca i32, align 4 -> 1
+🥹 Processing BB: entry
+  👀 Processing Ins:   %retval = alloca i32, align 4
+   ➕ Adding to KILL: %retval
+  --
+  👀 Processing Ins:   %result = alloca i32, align 4
+   ➕ Adding to KILL: %result
+  --
+  👀 Processing Ins:   store i32 0, ptr %retval, align 4
+   ❌ Not adding to GEN (not upward exposed): %retval
+  --
+  👀 Processing Ins:   %call = call noundef i32 @_Z16loop_stress_testii(i32 noundef 5, i32 noundef 10), !dbg !16
+  --
+  👀 Processing Ins:   store i32 %call, ptr %result, align 4, !dbg !15
+   ➕ Adding to GEN: %call
+   ❌ Not adding to GEN (not upward exposed): %result
+  --
+  👀 Processing Ins:   ret i32 0, !dbg !17
+   ❌ Instruction not in domain (should not happen):   ret i32 0, !dbg !17
+
+BB: entry
+  GEN: { %call }
+  KILL: { %result, %retval }
+0 -> %result
+1 -> %retval
+2 -> %call
+
+--- Iteration 1 ---
+
+Processing BB: entry
+  Current IN: BitVector: |000
+  Current OUT: BitVector: |000
+  GEN: BitVector: |001
+  KILL: BitVector: |110
+  Updated IN: BitVector: |001
+  Updated OUT: BitVector: |000
+
+--- Iteration 2 ---
+
+Processing BB: entry
+  Current IN: BitVector: |001
+  Current OUT: BitVector: |000
+  GEN: BitVector: |001
+  KILL: BitVector: |110
+  No change in IN/OUT.
+--- Running Reaching Definitions ---
+--- Running Reaching Definitions ---
+--- Running Available Expressions ---
+--- Running Available Expressions ---
+--- Running Anticipable Expressions ---
+--- Running Anticipable Expressions ---
