@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: ./run_single_interval.sh -i <input.{ll,c,cpp}> [-o <output-file>] [-b <build-dir>] [-k] [-r]
-                              [-s|-S] [-f|-F] [-l|-L]
+                              [-s|-S] [-f|-F] [-l|-L] [-a <artifact-dir>]
 
 Options:
   -i <file>   Input source (.ll, .c, .cpp)
@@ -12,6 +12,7 @@ Options:
   -b <dir>    Build directory (default: ./build)
   -k          Keep intermediate .ll when compiling from C/C++
   -r          Force rebuild opt/clang with ninja before running
+  -a <dir>    Artifact directory (writes original.ir, after-prepass.ir, interval.out, result.md)
 
 Pre-Pass Running Flags:
   -s          Enable sroa pre-pass (default: enabled)
@@ -38,6 +39,7 @@ FORCE_REBUILD=0
 PRE_SROA=1
 PRE_SIMPLIFYCFG=1
 PRE_LOOP_SIMPLIFY=1
+ARTIFACT_DIR=""
 
 ensure_build() {
   local jobs="${JOBS:-$(nproc)}"
@@ -58,11 +60,12 @@ ensure_build() {
   fi
 }
 
-while getopts ":i:o:b:krsSfFlLh" opt; do
+while getopts ":i:o:b:a:krsSfFlLh" opt; do
   case "$opt" in
     i) INPUT_FILE="$OPTARG" ;;
     o) OUTPUT_FILE="$OPTARG" ;;
     b) BUILD_DIR="$OPTARG" ;;
+    a) ARTIFACT_DIR="$OPTARG" ;;
     k) KEEP_IR=1 ;;
     r) FORCE_REBUILD=1 ;;
     s) PRE_SROA=1 ;;
@@ -111,19 +114,24 @@ if [[ -z "$OUTPUT_FILE" ]]; then
   OUTPUT_FILE="$ROOT_DIR/${BASE_NAME}_interval.out"
 fi
 
-declare -a PIPELINE=()
+declare -a PRE_PIPELINE=()
 if [[ "$PRE_SROA" -eq 1 ]]; then
-  PIPELINE+=("sroa")
+  PRE_PIPELINE+=("sroa")
 fi
 if [[ "$PRE_SIMPLIFYCFG" -eq 1 ]]; then
-  PIPELINE+=("simplifycfg")
+  PRE_PIPELINE+=("simplifycfg")
 fi
 if [[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]]; then
-  PIPELINE+=("loop-simplify")
+  PRE_PIPELINE+=("loop-simplify")
 fi
-PIPELINE+=("interval-analysis")
 
-PASS_PIPELINE="$(IFS=,; echo "${PIPELINE[*]}")"
+PRE_PASS_PIPELINE="$(IFS=,; echo "${PRE_PIPELINE[*]}")"
+PASS_PIPELINE="$PRE_PASS_PIPELINE"
+if [[ -n "$PASS_PIPELINE" ]]; then
+  PASS_PIPELINE+=",interval-analysis"
+else
+  PASS_PIPELINE="interval-analysis"
+fi
 
 echo "Pre-Pass Running:"
 echo "  sroa: $([[ "$PRE_SROA" -eq 1 ]] && echo enabled || echo disabled)"
@@ -131,7 +139,58 @@ echo "  simplifycfg: $([[ "$PRE_SIMPLIFYCFG" -eq 1 ]] && echo enabled || echo di
 echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || echo disabled)"
 echo "Pipeline: $PASS_PIPELINE"
 
-"$OPT_BIN" -disable-output -passes="$PASS_PIPELINE" "$WORK_IR" > "$OUTPUT_FILE"
+if [[ -n "$ARTIFACT_DIR" ]]; then
+  mkdir -p "$ARTIFACT_DIR"
+
+  ORIGINAL_IR="$ARTIFACT_DIR/original.ir"
+  PREPASS_IR="$ARTIFACT_DIR/after-prepass.ir"
+  INTERVAL_OUT="$ARTIFACT_DIR/interval.out"
+  REPORT_MD="$ARTIFACT_DIR/result.md"
+
+  cp "$WORK_IR" "$ORIGINAL_IR"
+
+  if [[ -n "$PRE_PASS_PIPELINE" ]]; then
+    "$OPT_BIN" -S -passes="$PRE_PASS_PIPELINE" "$ORIGINAL_IR" -o "$PREPASS_IR"
+  else
+    cp "$ORIGINAL_IR" "$PREPASS_IR"
+  fi
+
+  "$OPT_BIN" -disable-output -passes="interval-analysis" "$PREPASS_IR" > "$INTERVAL_OUT"
+
+  {
+    echo "# Interval Analysis Report"
+    echo
+    echo '```text'
+    echo "+------------------------------------------------------------------+"
+    echo "|                    INTERVAL ANALYSIS REPORT                      |"
+    echo "+------------------------------------------------------------------+"
+    echo "| Test File   : $INPUT_FILE"
+    echo "| Pre-Passes  : ${PRE_PASS_PIPELINE:-none}"
+    echo "| Main Pass   : interval-analysis"
+    echo "+------------------------------------------------------------------+"
+    echo '```'
+    echo
+    echo "## Generated Artifacts"
+    echo
+    echo "- original.ir"
+    echo "- after-prepass.ir"
+    echo "- interval.out"
+    echo
+    echo "## Final Interval Output"
+    echo
+    echo '```text'
+    cat "$INTERVAL_OUT"
+    echo '```'
+  } > "$REPORT_MD"
+
+  if [[ "$INTERVAL_OUT" != "$OUTPUT_FILE" ]]; then
+    cp "$INTERVAL_OUT" "$OUTPUT_FILE"
+  fi
+  echo "Artifact directory: $ARTIFACT_DIR"
+  echo "Markdown report: $REPORT_MD"
+else
+  "$OPT_BIN" -disable-output -passes="$PASS_PIPELINE" "$WORK_IR" > "$OUTPUT_FILE"
+fi
 
 echo "Interval analysis output: $OUTPUT_FILE"
 

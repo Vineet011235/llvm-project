@@ -1,13 +1,5 @@
-#include <cstdint>
-
-int clamp_shift(int x) {
-  int bias = x + 5;
-  int scaled = bias * 3;
-  if (scaled > 100)
-    return scaled - 100;
-  return scaled + 7;
-}
-
-int main() {
-  return clamp_shift(10);
+int main(){
+  int a = 100;
+  int b = a + 10;
+  int c = a - b;
 }

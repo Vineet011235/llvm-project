@@ -81,11 +81,12 @@ echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || ech
 for FILE in "${INPUTS[@]}"; do
   REL_PATH="${FILE#$INPUT_DIR/}"
   REL_NO_EXT="${REL_PATH%.*}"
-  OUT_FILE="$OUTPUT_DIR/${REL_NO_EXT}.interval.out"
-  mkdir -p "$(dirname "$OUT_FILE")"
+  ARTIFACT_DIR="$OUTPUT_DIR/${REL_NO_EXT}"
+  OUT_FILE="$ARTIFACT_DIR/interval.out"
+  mkdir -p "$ARTIFACT_DIR"
 
   declare -a SINGLE_ARGS
-  SINGLE_ARGS=(-i "$FILE" -o "$OUT_FILE" -b "$BUILD_DIR")
+  SINGLE_ARGS=(-i "$FILE" -o "$OUT_FILE" -a "$ARTIFACT_DIR" -b "$BUILD_DIR")
   if [[ "$KEEP_IR" -eq 1 ]]; then
     SINGLE_ARGS+=("-k")
   fi

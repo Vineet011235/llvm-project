@@ -1,0 +1,31 @@
+### Basic Block: %entry
+| Value | Interval |
+|---|---|
+
+### Basic Block: %for.cond
+| Value | Interval |
+|---|---|
+| %a.0 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc1 | [-INF, INF] |
+
+### Basic Block: %for.body
+| Value | Interval |
+|---|---|
+| %a.0 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc1 | [-INF, INF] |
+
+### Basic Block: %for.end
+| Value | Interval |
+|---|---|
+| %a.0 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc1 | [-INF, INF] |
+
