@@ -13,7 +13,10 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-cmake -S "$LLVM_SRC_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build "$BUILD_DIR" --target opt clang -j "$JOBS"
+if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
+  cmake -S "$LLVM_SRC_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
+fi
+
+ninja -C "$BUILD_DIR" -j "$JOBS" opt clang
 
 echo "Build check successful."

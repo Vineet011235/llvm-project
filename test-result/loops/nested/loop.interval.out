@@ -1,0 +1,95 @@
+### Basic Block: %entry
+| Value | Interval |
+|---|---|
+| %n | [-INF, INF] |
+
+### Basic Block: %for.cond
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+
+### Basic Block: %for.cond1.preheader
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+
+### Basic Block: %for.cond1
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+
+### Basic Block: %for.body3
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+
+### Basic Block: %for.inc5
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+
+### Basic Block: %for.end7
+| Value | Interval |
+|---|---|
+| %acc.0 | [-INF, INF] |
+| %acc.1 | [-INF, INF] |
+| %add | [-INF, INF] |
+| %add4 | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %cmp2 | [-INF, INF] |
+| %i.0 | [-INF, INF] |
+| %inc | [-INF, INF] |
+| %inc6 | [-INF, INF] |
+| %j.0 | [-INF, INF] |
+| %n | [-INF, INF] |
+

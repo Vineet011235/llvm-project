@@ -1,0 +1,10 @@
+### Basic Block: %entry
+| Value | Interval |
+|---|---|
+| %add | [-INF, INF] |
+| %cmp | [-INF, INF] |
+| %sub | [-INF, INF] |
+| %sub1 | [-INF, INF] |
+| %x | [-INF, INF] |
+| %y.0 | [-INF, INF] |
+
