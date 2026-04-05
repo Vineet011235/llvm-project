@@ -9,9 +9,9 @@
 #include "llvm/Analysis/CustomIntervalAnalysis.h"
 
 #include "llvm/ADT/APInt.h"
-#include "llvm/ADT/DepthFirstIterator.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/BasicBlock.h"
@@ -30,6 +30,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -276,6 +277,13 @@ static Interval widenInterval(const Interval &OldI, const Interval &NewI) {
   return Result;
 }
 
+static Interval narrowInterval(const Interval &OldI, const Interval &NewI) {
+  Interval Result = OldI;
+  Result.Lower = OldI.Lower.has_value() ? OldI.Lower : NewI.Lower;
+  Result.Upper = OldI.Upper.has_value() ? OldI.Upper : NewI.Upper;
+  return Result;
+}
+
 static bool tryGetInt64Constant(const Value *V, Bound &Out) {
   auto *CI = dyn_cast<ConstantInt>(V);
   if (!CI)
@@ -305,34 +313,83 @@ static Box getValueInterval(const Value *V, const BlockState &State) {
 }
 
 static Interval addIntervals(const Interval &A, const Interval &B) {
-  if (!A.Lower.has_value() || !B.Lower.has_value())
-    return Interval::top();
-  if (!A.Upper.has_value() || !B.Upper.has_value())
-    return Interval::top();
+  std::optional<Bound> Lower = std::nullopt;
+  std::optional<Bound> Upper = std::nullopt;
 
-  auto Lower = safeAdd(*A.Lower, *B.Lower);
-  auto Upper = safeAdd(*A.Upper, *B.Upper);
-  if (!Lower.has_value() || !Upper.has_value())
-    return Interval::top();
+  if (A.Lower.has_value() && B.Lower.has_value()) {
+    Lower = safeAdd(*A.Lower, *B.Lower);
+    if (!Lower.has_value())
+      return Interval::top();
+  }
+
+  if (A.Upper.has_value() && B.Upper.has_value()) {
+    Upper = safeAdd(*A.Upper, *B.Upper);
+    if (!Upper.has_value())
+      return Interval::top();
+  }
 
   return Interval{Lower, Upper};
 }
 
 static Interval subIntervals(const Interval &A, const Interval &B) {
-  if (!A.Lower.has_value() || !B.Lower.has_value())
-    return Interval::top();
-  if (!A.Upper.has_value() || !B.Upper.has_value())
-    return Interval::top();
+  std::optional<Bound> Lower = std::nullopt;
+  std::optional<Bound> Upper = std::nullopt;
 
-  auto Lower = safeSub(*A.Lower, *B.Upper);
-  auto Upper = safeSub(*A.Upper, *B.Lower);
-  if (!Lower.has_value() || !Upper.has_value())
-    return Interval::top();
+  if (A.Lower.has_value() && B.Upper.has_value()) {
+    Lower = safeSub(*A.Lower, *B.Upper);
+    if (!Lower.has_value())
+      return Interval::top();
+  }
+
+  if (A.Upper.has_value() && B.Lower.has_value()) {
+    Upper = safeSub(*A.Upper, *B.Lower);
+    if (!Upper.has_value())
+      return Interval::top();
+  }
 
   return Interval{Lower, Upper};
 }
 
 static Interval mulIntervals(const Interval &A, const Interval &B) {
+  auto scaleByConstant = [](const Interval &I, Bound C) -> Interval {
+    if (C == 0)
+      return Interval::constant(0);
+
+    std::optional<Bound> Lower = std::nullopt;
+    std::optional<Bound> Upper = std::nullopt;
+
+    if (C > 0) {
+      if (I.Lower.has_value()) {
+        Lower = safeMul(*I.Lower, C);
+        if (!Lower.has_value())
+          return Interval::top();
+      }
+      if (I.Upper.has_value()) {
+        Upper = safeMul(*I.Upper, C);
+        if (!Upper.has_value())
+          return Interval::top();
+      }
+    } else {
+      if (I.Upper.has_value()) {
+        Lower = safeMul(*I.Upper, C);
+        if (!Lower.has_value())
+          return Interval::top();
+      }
+      if (I.Lower.has_value()) {
+        Upper = safeMul(*I.Lower, C);
+        if (!Upper.has_value())
+          return Interval::top();
+      }
+    }
+
+    return Interval{Lower, Upper};
+  };
+
+  if (A.isConstant())
+    return scaleByConstant(B, *A.Lower);
+  if (B.isConstant())
+    return scaleByConstant(A, *B.Lower);
+
   if (!A.Lower.has_value() || !A.Upper.has_value() || !B.Lower.has_value() ||
       !B.Upper.has_value())
     return Interval::top();
@@ -390,9 +447,45 @@ static Interval castInterval(const CastInst &CI, const Interval &Input) {
 
 static Box joinBoxes(const Box &A, const Box &B) { return Box::unite(A, B); }
 
+static std::optional<Interval> intersectIntervals(const Interval &A,
+                                                  const Interval &B) {
+  std::optional<Bound> Lower =
+      Box::compareLower(A.Lower, B.Lower) >= 0 ? A.Lower : B.Lower;
+  std::optional<Bound> Upper =
+      Box::compareUpper(A.Upper, B.Upper) <= 0 ? A.Upper : B.Upper;
+
+  if (Lower.has_value() && Upper.has_value() && *Lower > *Upper)
+    return std::nullopt;
+  return Interval{Lower, Upper};
+}
+
+static std::optional<Box> intersectBoxes(const Box &A, const Box &B) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
+  for (const Interval &IA : A.Intervals) {
+    for (const Interval &IB : B.Intervals) {
+      std::optional<Interval> Intersected = intersectIntervals(IA, IB);
+      if (Intersected.has_value())
+        ResultIntervals.push_back(*Intersected);
+    }
+  }
+
+  if (ResultIntervals.empty())
+    return std::nullopt;
+
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
 static Box widenBox(const Box &OldB, const Box &NewB) {
   Interval Widened = widenInterval(OldB.hull(), NewB.hull());
   return Box::fromInterval(Widened);
+}
+
+static Box narrowBox(const Box &OldB, const Box &NewB) {
+  Interval Narrowed = narrowInterval(OldB.hull(), NewB.hull());
+  return Box::fromInterval(Narrowed);
 }
 
 static Box addBoxes(const Box &A, const Box &B) {
@@ -461,6 +554,22 @@ static const Value *getMemorySlot(const Value *Ptr) {
   return Ptr ? Ptr->stripPointerCasts() : nullptr;
 }
 
+static void applySuccessorPhiEdges(const BasicBlock &BB, BlockState &State) {
+  for (const BasicBlock *Succ : successors(&BB)) {
+    for (const Instruction &SuccInst : *Succ) {
+      const auto *Phi = dyn_cast<PHINode>(&SuccInst);
+      if (!Phi)
+        break;
+
+      const Value *IncomingValue = Phi->getIncomingValueForBlock(&BB);
+      if (!IncomingValue)
+        continue;
+
+      State[Phi] = getValueInterval(IncomingValue, State);
+    }
+  }
+}
+
 static bool statesEqual(const BlockState &A, const BlockState &B) {
   if (A.size() != B.size())
     return false;
@@ -474,6 +583,107 @@ static bool statesEqual(const BlockState &A, const BlockState &B) {
   return true;
 }
 
+static std::optional<Box> getConstraintForPredicate(CmpInst::Predicate Pred,
+                                                    Bound C) {
+  switch (Pred) {
+  case CmpInst::ICMP_SLT: {
+    auto Upper = safeSub(C, 1);
+    if (!Upper.has_value())
+      return std::nullopt;
+    return Box::fromInterval(Interval{std::nullopt, *Upper});
+  }
+  case CmpInst::ICMP_SLE:
+    return Box::fromInterval(Interval{std::nullopt, C});
+  case CmpInst::ICMP_SGT: {
+    auto Lower = safeAdd(C, 1);
+    if (!Lower.has_value())
+      return std::nullopt;
+    return Box::fromInterval(Interval{*Lower, std::nullopt});
+  }
+  case CmpInst::ICMP_SGE:
+    return Box::fromInterval(Interval{C, std::nullopt});
+  case CmpInst::ICMP_EQ:
+    return Box::constant(C);
+  case CmpInst::ICMP_NE: {
+    std::vector<Interval> Intervals;
+    if (auto Upper = safeSub(C, 1); Upper.has_value())
+      Intervals.push_back(Interval{std::nullopt, *Upper});
+    if (auto Lower = safeAdd(C, 1); Lower.has_value())
+      Intervals.push_back(Interval{*Lower, std::nullopt});
+    if (Intervals.empty())
+      return std::nullopt;
+    Box Result{std::move(Intervals)};
+    Result.normalize();
+    return Result;
+  }
+  default:
+    return std::nullopt;
+  }
+}
+
+static std::optional<BlockState> refinePredecessorForEdge(const BasicBlock *Pred,
+                                                          const BasicBlock *Succ,
+                                                          const BlockState &PredOut) {
+  BlockState Refined = PredOut;
+
+  const auto *BI = dyn_cast<BranchInst>(Pred->getTerminator());
+  if (!BI || !BI->isConditional())
+    return Refined;
+
+  unsigned SuccIndex = BI->getSuccessor(0) == Succ ? 0 : BI->getSuccessor(1) == Succ ? 1 : 2;
+  if (SuccIndex >= 2)
+    return Refined;
+
+  const auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
+  if (!Cmp)
+    return Refined;
+
+  const Value *Var = Cmp->getOperand(0);
+  const Value *ConstV = Cmp->getOperand(1);
+  CmpInst::Predicate PredKind = Cmp->getPredicate();
+
+  Bound C = 0;
+  if (!tryGetInt64Constant(ConstV, C)) {
+    Bound LeftC = 0;
+    if (!tryGetInt64Constant(Var, LeftC))
+      return Refined;
+
+    Var = Cmp->getOperand(1);
+    C = LeftC;
+    PredKind = ICmpInst::getSwappedPredicate(PredKind);
+  }
+
+  if (!Var->getType()->isIntegerTy())
+    return Refined;
+
+  if (SuccIndex == 1)
+    PredKind = Cmp->getInversePredicate(PredKind);
+
+  std::optional<Box> Constraint = getConstraintForPredicate(PredKind, C);
+  if (!Constraint.has_value())
+    return Refined;
+
+  Box CurrentValue = getValueInterval(Var, PredOut);
+  std::optional<Box> Intersected = intersectBoxes(CurrentValue, *Constraint);
+  if (!Intersected.has_value()) {
+    LLVM_DEBUG(dbgs() << "[interval] infeasible edge " << Pred->getName() << " -> "
+                      << Succ->getName() << " for "
+                      << Var->getNameOrAsOperand() << " under predicate "
+                      << CmpInst::getPredicateName(PredKind) << " " << C << "\n");
+    return std::nullopt;
+  }
+
+  if (*Intersected != CurrentValue) {
+    LLVM_DEBUG(dbgs() << "[interval] edge refine " << Pred->getName() << " -> "
+                      << Succ->getName() << ": "
+                      << Var->getNameOrAsOperand() << " " << CurrentValue.str()
+                      << " => " << Intersected->str() << "\n");
+  }
+
+  Refined[Var] = *Intersected;
+  return Refined;
+}
+
 static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
                                       const BlockState &EntrySeed,
                                       bool IsEntry) {
@@ -485,7 +695,12 @@ static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
     if (PredOutIt == Out.end())
       continue;
 
-    const BlockState &PredOut = PredOutIt->second;
+    std::optional<BlockState> RefinedPredState =
+        refinePredecessorForEdge(Pred, BB, PredOutIt->second);
+    if (!RefinedPredState.has_value())
+      continue;
+
+    const BlockState &PredOut = *RefinedPredState;
     if (!HasAnyPredState) {
       In = PredOut;
       HasAnyPredState = true;
@@ -540,7 +755,32 @@ static BlockState widenState(const BlockState &OldState, const BlockState &NewSt
   return Result;
 }
 
-static BlockState transferBlock(const BasicBlock &BB, const BlockState &In) {
+static BlockState narrowState(const BlockState &OldState,
+                              const BlockState &NewState,
+                              const BasicBlock *BB) {
+  BlockState Result = OldState;
+
+  for (const auto &KV : NewState) {
+    auto It = Result.find(KV.first);
+    if (It == Result.end()) {
+      Result[KV.first] = KV.second;
+      continue;
+    }
+
+    Box Narrowed = narrowBox(It->second, KV.second);
+    if (Narrowed != It->second) {
+      LLVM_DEBUG(dbgs() << "[interval] narrow in block " << BB->getName() << ": "
+                        << KV.first->getNameOrAsOperand() << " "
+                        << It->second.str() << " -> " << Narrowed.str() << "\n");
+    }
+    It->second = Narrowed;
+  }
+
+  return Result;
+}
+
+static BlockState transferBlock(const BasicBlock &BB, const BlockState &In,
+                                const StateMap &Out) {
   BlockState Current = In;
 
   for (const Instruction &I : BB) {
@@ -590,20 +830,10 @@ static BlockState transferBlock(const BasicBlock &BB, const BlockState &In) {
     } else if (auto *CI = dyn_cast<CastInst>(&I)) {
       Box Input = getValueInterval(CI->getOperand(0), Current);
       Result = castBox(*CI, Input);
-    } else if (auto *PN = dyn_cast<PHINode>(&I)) {
-      // Path-insensitive phi handling by joining incoming value ranges.
-      bool Initialized = false;
-      for (unsigned Idx = 0; Idx < PN->getNumIncomingValues(); ++Idx) {
-        Box Incoming = getValueInterval(PN->getIncomingValue(Idx), Current);
-        if (!Initialized) {
-          Result = Incoming;
-          Initialized = true;
-        } else {
-          Result = joinBoxes(Result, Incoming);
-        }
-      }
-      if (!Initialized)
-        Result = Box::top();
+    } else if (isa<PHINode>(&I)) {
+      // PHI values are attached to predecessor edges. The current block keeps
+      // the merged value from IN, so the PHI instruction itself is skipped.
+      Result = getValueInterval(&I, Current);
     } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
       Box TrueValue = getValueInterval(SI->getTrueValue(), Current);
       Box FalseValue = getValueInterval(SI->getFalseValue(), Current);
@@ -623,11 +853,9 @@ static std::vector<const BasicBlock *> computeRPO(const Function &F) {
   if (F.empty())
     return Order;
 
-  const BasicBlock *Entry = &F.getEntryBlock();
-  for (const BasicBlock *BB : depth_first(Entry))
+  ReversePostOrderTraversal<const Function *> RPO(&F);
+  for (const BasicBlock *BB : RPO)
     Order.push_back(BB);
-
-  std::reverse(Order.begin(), Order.end());
 
   // Add unreachable blocks in function order to keep deterministic traversal.
   for (const BasicBlock &BB : F) {
@@ -800,61 +1028,92 @@ PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
   }
 
   std::vector<const BasicBlock *> RPO = computeRPO(F);
-  SetVector<const BasicBlock *> Worklist;
+  std::deque<const BasicBlock *> Worklist;
+  DenseSet<const BasicBlock *> InWorklist;
+  DenseMap<const BasicBlock *, unsigned> VisitCount;
   for (const BasicBlock *BB : RPO)
-    Worklist.insert(BB);
+    Worklist.push_back(BB), InWorklist.insert(BB);
 
   const BasicBlock *EntryBB = F.empty() ? nullptr : &F.getEntryBlock();
 
   while (!Worklist.empty()) {
-    const BasicBlock *BB = Worklist.pop_back_val();
+    const BasicBlock *BB = Worklist.front();
+    Worklist.pop_front();
+    InWorklist.erase(BB);
+    unsigned ThisVisit = ++VisitCount[BB];
     LLVM_DEBUG(dbgs() << "[interval] process block " << BB->getName() << "\n");
 
     BlockState NewIn = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
 
     if (LI.isLoopHeader(BB)) {
       auto OldInIt = IN.find(BB);
-      if (OldInIt != IN.end())
+      if (ThisVisit > 2 && OldInIt != IN.end()) {
+        LLVM_DEBUG(dbgs() << "[interval] apply widening in loop header "
+                          << BB->getName() << " visit=" << ThisVisit << "\n");
         NewIn = widenState(OldInIt->second, NewIn, BB);
+      } else {
+        LLVM_DEBUG(dbgs() << "[interval] skip widening in loop header "
+                          << BB->getName() << " visit=" << ThisVisit << "\n");
+      }
     }
 
     IN[BB] = NewIn;
 
-    BlockState NewOut = transferBlock(*BB, NewIn);
+    BlockState NewOut = transferBlock(*BB, NewIn, OUT);
+    applySuccessorPhiEdges(*BB, NewOut);
 
     auto OldOutIt = OUT.find(BB);
     if (OldOutIt == OUT.end() || !statesEqual(NewOut, OldOutIt->second)) {
       OUT[BB] = std::move(NewOut);
-      for (const BasicBlock *Succ : successors(BB))
-        Worklist.insert(Succ);
+      for (const BasicBlock *Succ : successors(BB)) {
+        if (InWorklist.insert(Succ).second)
+          Worklist.push_back(Succ);
+      }
     }
   }
 
-  // One bounded narrowing sweep over loop headers.
-  for (const BasicBlock &BBRef : F) {
-    const BasicBlock *BB = &BBRef;
-    if (!LI.isLoopHeader(BB))
-      continue;
+  // Bounded narrowing sweeps over loop headers.
+  constexpr unsigned MaxNarrowingSweeps = 5;
+  for (unsigned Sweep = 0; Sweep < MaxNarrowingSweeps; ++Sweep) {
+    bool AnyChanged = false;
 
-    BlockState NarrowIn = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
-    BlockState NarrowOut = transferBlock(*BB, NarrowIn);
+    for (const BasicBlock &BBRef : F) {
+      const BasicBlock *BB = &BBRef;
+      if (!LI.isLoopHeader(BB))
+        continue;
 
-    bool InChanged = true;
-    auto InIt = IN.find(BB);
-    if (InIt != IN.end())
-      InChanged = !statesEqual(NarrowIn, InIt->second);
+      BlockState MergedIn =
+          mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
+      auto OldInIt = IN.find(BB);
+      BlockState NarrowIn =
+          OldInIt != IN.end() ? narrowState(OldInIt->second, MergedIn, BB)
+                              : std::move(MergedIn);
 
-    bool OutChanged = true;
-    auto OutIt = OUT.find(BB);
-    if (OutIt != OUT.end())
-      OutChanged = !statesEqual(NarrowOut, OutIt->second);
+      BlockState NarrowOut = transferBlock(*BB, NarrowIn, OUT);
+      applySuccessorPhiEdges(*BB, NarrowOut);
 
-    if (InChanged || OutChanged) {
-      LLVM_DEBUG(dbgs() << "[interval] narrowing update in loop header "
-                        << BB->getName() << "\n");
-      IN[BB] = std::move(NarrowIn);
-      OUT[BB] = std::move(NarrowOut);
+      bool InChanged = true;
+      auto InIt = IN.find(BB);
+      if (InIt != IN.end())
+        InChanged = !statesEqual(NarrowIn, InIt->second);
+
+      bool OutChanged = true;
+      auto OutIt = OUT.find(BB);
+      if (OutIt != OUT.end())
+        OutChanged = !statesEqual(NarrowOut, OutIt->second);
+
+      if (InChanged || OutChanged) {
+        LLVM_DEBUG(dbgs() << "[interval] narrowing update in loop header "
+                          << BB->getName() << " sweep=" << (Sweep + 1)
+                          << "\n");
+        IN[BB] = std::move(NarrowIn);
+        OUT[BB] = std::move(NarrowOut);
+        AnyChanged = true;
+      }
     }
+
+    if (!AnyChanged)
+      break;
   }
 
   printOutState(F, IN, OUT);

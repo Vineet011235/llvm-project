@@ -1,12 +1,10 @@
+#include <iostream>
+
 int main(){
-  int a = 100;
-  int e = a + 6;
-  if( a > 150 ) {
-    a = 200;
-  } 
-  else {
-    a = 300;
+  int a = 10;
+  for (int i = 0; i < 5; ++i) {
+    a += 1;
   }
-  int b = a + 10;
-  int c = a - b;
+  int b = a * 2;
+  return 0;
 }

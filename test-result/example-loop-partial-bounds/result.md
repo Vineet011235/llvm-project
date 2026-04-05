@@ -31,44 +31,44 @@
 +--------------------------------------+
 | Variable | BoxIn       | BoxOut      |
 | -------- | ----------- | ----------- |
-| %a.0     | [10, INF]   | [10, INF]   |
-| %add     | [11, INF]   | [11, INF]   |
+| %a.0     | [-INF, INF] | [-INF, INF] |
+| %add     | [-INF, INF] | [-INF, INF] |
 | %cmp     | [-INF, INF] | [-INF, INF] |
-| %i.0     | [0, 5]      | [0, 5]      |
-| %inc     | [1, 5]      | [1, 5]      |
+| %i.0     | [-INF, INF] | [-INF, INF] |
+| %inc     | [-INF, INF] | [-INF, INF] |
 
 +--------------------------------------+
 |  Basic Block: %for.body              |
 +--------------------------------------+
 | Variable | BoxIn       | BoxOut      |
 | -------- | ----------- | ----------- |
-| %a.0     | [10, INF]   | [10, INF]   |
-| %add     | [11, INF]   | [11, INF]   |
+| %a.0     | [-INF, INF] | [-INF, INF] |
+| %add     | [-INF, INF] | [-INF, INF] |
 | %cmp     | [-INF, INF] | [-INF, INF] |
-| %i.0     | [0, 4]      | [0, 4]      |
-| %inc     | [1, INF]    | [1, INF]    |
+| %i.0     | [-INF, INF] | [-INF, INF] |
+| %inc     | [-INF, INF] | [-INF, INF] |
 
 +--------------------------------------+
 |  Basic Block: %for.inc               |
 +--------------------------------------+
 | Variable | BoxIn       | BoxOut      |
 | -------- | ----------- | ----------- |
-| %a.0     | [10, INF]   | [11, INF]   |
-| %add     | [11, INF]   | [11, INF]   |
+| %a.0     | [-INF, INF] | [-INF, INF] |
+| %add     | [-INF, INF] | [-INF, INF] |
 | %cmp     | [-INF, INF] | [-INF, INF] |
-| %i.0     | [0, 4]      | [1, 5]      |
-| %inc     | [1, INF]    | [1, 5]      |
+| %i.0     | [-INF, INF] | [-INF, INF] |
+| %inc     | [-INF, INF] | [-INF, INF] |
 
 +--------------------------------------+
 |  Basic Block: %for.end               |
 +--------------------------------------+
 | Variable | BoxIn       | BoxOut      |
 | -------- | ----------- | ----------- |
-| %a.0     | [10, INF]   | [10, INF]   |
-| %add     | [11, INF]   | [11, INF]   |
+| %a.0     | [-INF, INF] | [-INF, INF] |
+| %add     | [-INF, INF] | [-INF, INF] |
 | %cmp     | [-INF, INF] | [-INF, INF] |
-| %i.0     | [5, INF]    | [5, INF]    |
-| %inc     | [1, INF]    | [1, INF]    |
-| %mul     | -           | [20, INF]   |
+| %i.0     | [-INF, INF] | [-INF, INF] |
+| %inc     | [-INF, INF] | [-INF, INF] |
+| %mul     | -           | [-INF, INF] |
 
 ```
