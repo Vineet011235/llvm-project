@@ -1,8 +1,0 @@
-### Basic Block: %entry
-| Value | Interval |
-|---|---|
-| %a | [-INF, INF] |
-| %add | [-INF, INF] |
-| %mul | [-INF, INF] |
-| %sub | [-INF, INF] |
-

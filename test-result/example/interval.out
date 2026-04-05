@@ -1,6 +1,0 @@
-### Basic Block: %entry
-| Value | Interval |
-|---|---|
-| %add | [110, 110] |
-| %sub | [-10, -10] |
-

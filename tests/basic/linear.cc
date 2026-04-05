@@ -1,6 +1,6 @@
 #include <iostream>
 using namespace std;
-int linear(int a) {
+int main() {
   int a = 100;
   int b = 1;
   int c = 2;

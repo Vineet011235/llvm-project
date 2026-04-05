@@ -4,7 +4,7 @@
 +------------------------------------------------------------------+
 |                    INTERVAL ANALYSIS REPORT                      |
 +------------------------------------------------------------------+
-| Test File   : /home/decompiler/llvm/llvm-project/tests/loops/nested/loop.cc
+| Test File   : /home/decompiler/llvm/llvm-project/tests/loops/nested/box_widen.cc
 | Pre-Passes  : none
 | Main Pass   : interval-analysis
 +------------------------------------------------------------------+
@@ -29,9 +29,9 @@
 +----------------------------------------------------------------------+
 | Value | Box         |
 | ----- | ----------- |
+| %add  | [-INF, INF] |
 | %cmp  | [-INF, INF] |
 | %inc  | [-INF, INF] |
-| %inc1 | [-INF, INF] |
 | %0    | [-INF, INF] |
 | %1    | [-INF, INF] |
 | %2    | [-INF, INF] |
@@ -41,9 +41,9 @@
 +----------------------------------------------------------------------+
 | Value | Box         |
 | ----- | ----------- |
+| %add  | [-INF, INF] |
 | %cmp  | [-INF, INF] |
 | %inc  | [-INF, INF] |
-| %inc1 | [-INF, INF] |
 | %0    | [-INF, INF] |
 | %1    | [-INF, INF] |
 | %2    | [-INF, INF] |
@@ -53,9 +53,9 @@
 +----------------------------------------------------------------------+
 | Value | Box         |
 | ----- | ----------- |
+| %add  | [-INF, INF] |
 | %cmp  | [-INF, INF] |
 | %inc  | [-INF, INF] |
-| %inc1 | [-INF, INF] |
 | %0    | [-INF, INF] |
 | %1    | [-INF, INF] |
 | %2    | [-INF, INF] |
@@ -65,13 +65,13 @@
 +----------------------------------------------------------------------+
 | Value | Box         |
 | ----- | ----------- |
+| %add  | [-INF, INF] |
 | %cmp  | [-INF, INF] |
+| %conv | [-INF, INF] |
 | %inc  | [-INF, INF] |
-| %inc1 | [-INF, INF] |
 | %0    | [-INF, INF] |
 | %1    | [-INF, INF] |
 | %2    | [-INF, INF] |
 | %3    | [-INF, INF] |
-| %4    | [-INF, INF] |
 
 ```

@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: ./run_single_interval.sh -i <input.{ll,c,cpp}> [-o <output-file>] [-b <build-dir>] [-k] [-r]
-                              [-s|-S] [-f|-F] [-l|-L] [-a <artifact-dir>]
+                              [-N] [-m|-M] [-s|-S] [-f|-F] [-l|-L] [-a <artifact-dir>]
 
 Options:
   -i <file>   Input source (.ll, .c, .cpp)
@@ -12,10 +12,13 @@ Options:
   -b <dir>    Build directory (default: ./build)
   -k          Keep intermediate .ll when compiling from C/C++
   -r          Force rebuild opt/clang with ninja before running
-  -a <dir>    Artifact directory (writes original.ir, after-prepass.ir, interval.out, result.md)
+  -a <dir>    Artifact directory (writes original.ir, after-prepass.ir, result.md)
 
 Pre-Pass Running Flags:
-  -s          Enable sroa pre-pass (default: enabled)
+  -N          Disable all pre-passes (mem2reg, sroa, simplifycfg, loop-simplify)
+  -m          Enable mem2reg pre-pass (default: enabled)
+  -M          Disable mem2reg pre-pass
+  -s          Enable sroa pre-pass (default: disabled)
   -S          Disable sroa pre-pass
   -f          Enable simplifycfg pre-pass (default: enabled)
   -F          Disable simplifycfg pre-pass
@@ -36,7 +39,8 @@ INPUT_FILE=""
 OUTPUT_FILE=""
 KEEP_IR=0
 FORCE_REBUILD=0
-PRE_SROA=1
+PRE_MEM2REG=1
+PRE_SROA=0
 PRE_SIMPLIFYCFG=1
 PRE_LOOP_SIMPLIFY=1
 ARTIFACT_DIR=""
@@ -60,7 +64,7 @@ ensure_build() {
   fi
 }
 
-while getopts ":i:o:b:a:krsSfFlLh" opt; do
+while getopts ":i:o:b:a:krNmMsSfFlLh" opt; do
   case "$opt" in
     i) INPUT_FILE="$OPTARG" ;;
     o) OUTPUT_FILE="$OPTARG" ;;
@@ -68,6 +72,14 @@ while getopts ":i:o:b:a:krsSfFlLh" opt; do
     a) ARTIFACT_DIR="$OPTARG" ;;
     k) KEEP_IR=1 ;;
     r) FORCE_REBUILD=1 ;;
+    N)
+      PRE_MEM2REG=0
+      PRE_SROA=0
+      PRE_SIMPLIFYCFG=0
+      PRE_LOOP_SIMPLIFY=0
+      ;;
+    m) PRE_MEM2REG=1 ;;
+    M) PRE_MEM2REG=0 ;;
     s) PRE_SROA=1 ;;
     S) PRE_SROA=0 ;;
     f) PRE_SIMPLIFYCFG=1 ;;
@@ -115,6 +127,9 @@ if [[ -z "$OUTPUT_FILE" ]]; then
 fi
 
 declare -a PRE_PIPELINE=()
+if [[ "$PRE_MEM2REG" -eq 1 ]]; then
+  PRE_PIPELINE+=("mem2reg")
+fi
 if [[ "$PRE_SROA" -eq 1 ]]; then
   PRE_PIPELINE+=("sroa")
 fi
@@ -134,6 +149,7 @@ else
 fi
 
 echo "Pre-Pass Running:"
+echo "  mem2reg: $([[ "$PRE_MEM2REG" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  sroa: $([[ "$PRE_SROA" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  simplifycfg: $([[ "$PRE_SIMPLIFYCFG" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || echo disabled)"
@@ -144,7 +160,6 @@ if [[ -n "$ARTIFACT_DIR" ]]; then
 
   ORIGINAL_IR="$ARTIFACT_DIR/original.ir"
   PREPASS_IR="$ARTIFACT_DIR/after-prepass.ir"
-  INTERVAL_OUT="$ARTIFACT_DIR/interval.out"
   REPORT_MD="$ARTIFACT_DIR/result.md"
 
   cp "$WORK_IR" "$ORIGINAL_IR"
@@ -154,8 +169,6 @@ if [[ -n "$ARTIFACT_DIR" ]]; then
   else
     cp "$ORIGINAL_IR" "$PREPASS_IR"
   fi
-
-  "$OPT_BIN" -disable-output -passes="interval-analysis" "$PREPASS_IR" > "$INTERVAL_OUT"
 
   {
     echo "# Interval Analysis Report"
@@ -174,25 +187,24 @@ if [[ -n "$ARTIFACT_DIR" ]]; then
     echo
     echo "- original.ir"
     echo "- after-prepass.ir"
-    echo "- interval.out"
     echo
     echo "## Final Interval Output"
     echo
     echo '```text'
-    cat "$INTERVAL_OUT"
+    "$OPT_BIN" -disable-output -passes="interval-analysis" "$PREPASS_IR"
     echo '```'
   } > "$REPORT_MD"
-
-  if [[ "$INTERVAL_OUT" != "$OUTPUT_FILE" ]]; then
-    cp "$INTERVAL_OUT" "$OUTPUT_FILE"
-  fi
   echo "Artifact directory: $ARTIFACT_DIR"
   echo "Markdown report: $REPORT_MD"
 else
   "$OPT_BIN" -disable-output -passes="$PASS_PIPELINE" "$WORK_IR" > "$OUTPUT_FILE"
 fi
 
-echo "Interval analysis output: $OUTPUT_FILE"
+if [[ -n "$ARTIFACT_DIR" ]]; then
+  echo "Interval analysis report: $REPORT_MD"
+else
+  echo "Interval analysis output: $OUTPUT_FILE"
+fi
 
 if [[ -n "$TEMP_IR" && "$KEEP_IR" -eq 0 ]]; then
   rm -f "$TEMP_IR"

@@ -6,18 +6,38 @@ target triple = "x86_64-unknown-linux-gnu"
 ; Function Attrs: mustprogress noinline norecurse nounwind uwtable
 define dso_local noundef i32 @main() #0 {
 entry:
+  %retval = alloca i32, align 4
   %a = alloca i32, align 4
+  %e = alloca i32, align 4
   %b = alloca i32, align 4
   %c = alloca i32, align 4
+  store i32 0, ptr %retval, align 4
   store i32 100, ptr %a, align 4
   %0 = load i32, ptr %a, align 4
-  %add = add nsw i32 %0, 10
-  store i32 %add, ptr %b, align 4
+  %add = add nsw i32 %0, 6
+  store i32 %add, ptr %e, align 4
   %1 = load i32, ptr %a, align 4
-  %2 = load i32, ptr %b, align 4
-  %sub = sub nsw i32 %1, %2
+  %cmp = icmp sgt i32 %1, 150
+  br i1 %cmp, label %if.then, label %if.else
+
+if.then:                                          ; preds = %entry
+  store i32 200, ptr %a, align 4
+  br label %if.end
+
+if.else:                                          ; preds = %entry
+  store i32 300, ptr %a, align 4
+  br label %if.end
+
+if.end:                                           ; preds = %if.else, %if.then
+  %2 = load i32, ptr %a, align 4
+  %add1 = add nsw i32 %2, 10
+  store i32 %add1, ptr %b, align 4
+  %3 = load i32, ptr %a, align 4
+  %4 = load i32, ptr %b, align 4
+  %sub = sub nsw i32 %3, %4
   store i32 %sub, ptr %c, align 4
-  ret i32 0
+  %5 = load i32, ptr %retval, align 4
+  ret i32 %5
 }
 
 attributes #0 = { mustprogress noinline norecurse nounwind uwtable "frame-pointer"="all" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="x86-64" "target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" "tune-cpu"="generic" }

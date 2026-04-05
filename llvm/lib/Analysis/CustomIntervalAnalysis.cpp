@@ -62,6 +62,9 @@ struct Interval {
   bool operator!=(const Interval &Other) const { return !(*this == Other); }
 
   std::string str() const {
+    if (isConstant())
+      return "{" + std::to_string(*Lower) + "}";
+
     std::string S;
     raw_string_ostream OS(S);
     OS << '[';
@@ -79,7 +82,147 @@ struct Interval {
   }
 };
 
-using BlockState = DenseMap<const Value *, Interval>;
+struct Box {
+  std::vector<Interval> Intervals;
+
+  static Box top() { return Box{{Interval::top()}}; }
+
+  static Box constant(Bound V) { return Box{{Interval::constant(V)}}; }
+
+  bool isTop() const {
+    return Intervals.size() == 1 && Intervals.front().isTop();
+  }
+
+  static int compareLower(const std::optional<Bound> &A,
+                          const std::optional<Bound> &B) {
+    if (!A.has_value() && !B.has_value())
+      return 0;
+    if (!A.has_value())
+      return -1;
+    if (!B.has_value())
+      return 1;
+    if (*A < *B)
+      return -1;
+    if (*A > *B)
+      return 1;
+    return 0;
+  }
+
+  static int compareUpper(const std::optional<Bound> &A,
+                          const std::optional<Bound> &B) {
+    if (!A.has_value() && !B.has_value())
+      return 0;
+    if (!A.has_value())
+      return 1;
+    if (!B.has_value())
+      return -1;
+    if (*A < *B)
+      return -1;
+    if (*A > *B)
+      return 1;
+    return 0;
+  }
+
+  static std::optional<Bound> minLower(const std::optional<Bound> &A,
+                                       const std::optional<Bound> &B) {
+    return compareLower(A, B) <= 0 ? A : B;
+  }
+
+  static std::optional<Bound> maxUpper(const std::optional<Bound> &A,
+                                       const std::optional<Bound> &B) {
+    return compareUpper(A, B) >= 0 ? A : B;
+  }
+
+  static bool overlapsOrTouches(const Interval &A, const Interval &B) {
+    if (!A.Upper.has_value() || !B.Lower.has_value())
+      return true;
+    if (*B.Lower <= *A.Upper)
+      return true;
+
+    if (*A.Upper == std::numeric_limits<Bound>::max())
+      return false;
+    return *B.Lower <= (*A.Upper + 1);
+  }
+
+  void normalize() {
+    if (Intervals.empty()) {
+      Intervals.push_back(Interval::top());
+      return;
+    }
+
+    llvm::sort(Intervals, [](const Interval &A, const Interval &B) {
+      int CmpLower = compareLower(A.Lower, B.Lower);
+      if (CmpLower != 0)
+        return CmpLower < 0;
+      return compareUpper(A.Upper, B.Upper) < 0;
+    });
+
+    std::vector<Interval> Merged;
+    Merged.reserve(Intervals.size());
+    Merged.push_back(Intervals.front());
+
+    for (size_t I = 1; I < Intervals.size(); ++I) {
+      Interval &Last = Merged.back();
+      const Interval &Cur = Intervals[I];
+      if (overlapsOrTouches(Last, Cur)) {
+        Last.Lower = minLower(Last.Lower, Cur.Lower);
+        Last.Upper = maxUpper(Last.Upper, Cur.Upper);
+      } else {
+        Merged.push_back(Cur);
+      }
+    }
+
+    Intervals = std::move(Merged);
+  }
+
+  static Box fromInterval(const Interval &I) {
+    Box B{{I}};
+    B.normalize();
+    return B;
+  }
+
+  static Box unite(const Box &A, const Box &B) {
+    Box Result;
+    Result.Intervals.reserve(A.Intervals.size() + B.Intervals.size());
+    Result.Intervals.insert(Result.Intervals.end(), A.Intervals.begin(),
+                            A.Intervals.end());
+    Result.Intervals.insert(Result.Intervals.end(), B.Intervals.begin(),
+                            B.Intervals.end());
+    Result.normalize();
+    return Result;
+  }
+
+  Interval hull() const {
+    if (Intervals.empty())
+      return Interval::top();
+
+    Interval Result = Intervals.front();
+    for (size_t I = 1; I < Intervals.size(); ++I) {
+      Result.Lower = minLower(Result.Lower, Intervals[I].Lower);
+      Result.Upper = maxUpper(Result.Upper, Intervals[I].Upper);
+    }
+    return Result;
+  }
+
+  bool operator==(const Box &Other) const {
+    return Intervals == Other.Intervals;
+  }
+
+  bool operator!=(const Box &Other) const { return !(*this == Other); }
+
+  std::string str() const {
+    std::string S;
+    raw_string_ostream OS(S);
+    for (size_t I = 0; I < Intervals.size(); ++I) {
+      if (I != 0)
+        OS << " U ";
+      OS << Intervals[I].str();
+    }
+    return S;
+  }
+};
+
+using BlockState = DenseMap<const Value *, Box>;
 using StateMap = DenseMap<const BasicBlock *, BlockState>;
 
 static cl::opt<bool> EnableIntervalAnalysis(
@@ -109,22 +252,6 @@ static std::optional<Bound> safeMul(Bound A, Bound B) {
   if (Overflow)
     return std::nullopt;
   return Product.getSExtValue();
-}
-
-static Interval joinIntervals(const Interval &A, const Interval &B) {
-  Interval Result;
-
-  if (!A.Lower.has_value() || !B.Lower.has_value())
-    Result.Lower = std::nullopt;
-  else
-    Result.Lower = std::min(*A.Lower, *B.Lower);
-
-  if (!A.Upper.has_value() || !B.Upper.has_value())
-    Result.Upper = std::nullopt;
-  else
-    Result.Upper = std::max(*A.Upper, *B.Upper);
-
-  return Result;
 }
 
 static Interval widenInterval(const Interval &OldI, const Interval &NewI) {
@@ -162,19 +289,19 @@ static bool tryGetInt64Constant(const Value *V, Bound &Out) {
   return true;
 }
 
-static Interval getValueInterval(const Value *V, const BlockState &State) {
+static Box getValueInterval(const Value *V, const BlockState &State) {
   Bound C = 0;
   if (tryGetInt64Constant(V, C))
-    return Interval::constant(C);
+    return Box::constant(C);
 
   auto It = State.find(V);
   if (It != State.end())
     return It->second;
 
   if (V->getType()->isIntegerTy())
-    return Interval::top();
+    return Box::top();
 
-  return Interval::top();
+  return Box::top();
 }
 
 static Interval addIntervals(const Interval &A, const Interval &B) {
@@ -261,6 +388,79 @@ static Interval castInterval(const CastInst &CI, const Interval &Input) {
   return Interval{MinV, MaxV};
 }
 
+static Box joinBoxes(const Box &A, const Box &B) { return Box::unite(A, B); }
+
+static Box widenBox(const Box &OldB, const Box &NewB) {
+  Interval Widened = widenInterval(OldB.hull(), NewB.hull());
+  return Box::fromInterval(Widened);
+}
+
+static Box addBoxes(const Box &A, const Box &B) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
+  for (const Interval &IA : A.Intervals) {
+    for (const Interval &IB : B.Intervals) {
+      Interval R = addIntervals(IA, IB);
+      if (R.isTop())
+        return Box::top();
+      ResultIntervals.push_back(R);
+    }
+  }
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
+static Box subBoxes(const Box &A, const Box &B) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
+  for (const Interval &IA : A.Intervals) {
+    for (const Interval &IB : B.Intervals) {
+      Interval R = subIntervals(IA, IB);
+      if (R.isTop())
+        return Box::top();
+      ResultIntervals.push_back(R);
+    }
+  }
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
+static Box mulBoxes(const Box &A, const Box &B) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
+  for (const Interval &IA : A.Intervals) {
+    for (const Interval &IB : B.Intervals) {
+      Interval R = mulIntervals(IA, IB);
+      if (R.isTop())
+        return Box::top();
+      ResultIntervals.push_back(R);
+    }
+  }
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
+static Box castBox(const CastInst &CI, const Box &Input) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(Input.Intervals.size());
+  for (const Interval &I : Input.Intervals) {
+    Interval R = castInterval(CI, I);
+    if (R.isTop())
+      return Box::top();
+    ResultIntervals.push_back(R);
+  }
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
+static const Value *getMemorySlot(const Value *Ptr) {
+  return Ptr ? Ptr->stripPointerCasts() : nullptr;
+}
+
 static bool statesEqual(const BlockState &A, const BlockState &B) {
   if (A.size() != B.size())
     return false;
@@ -297,7 +497,7 @@ static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
       if (It == In.end())
         In[KV.first] = KV.second;
       else
-        It->second = joinIntervals(It->second, KV.second);
+        It->second = joinBoxes(It->second, KV.second);
     }
   }
 
@@ -310,7 +510,7 @@ static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
       if (It == In.end())
         In[KV.first] = KV.second;
       else
-        It->second = joinIntervals(It->second, KV.second);
+        It->second = joinBoxes(It->second, KV.second);
     }
   }
 
@@ -328,7 +528,7 @@ static BlockState widenState(const BlockState &OldState, const BlockState &NewSt
       continue;
     }
 
-    Interval Widened = widenInterval(It->second, KV.second);
+    Box Widened = widenBox(It->second, KV.second);
     if (Widened != It->second) {
       LLVM_DEBUG(dbgs() << "[interval] widen in block " << BB->getName() << ": "
                         << KV.first->getNameOrAsOperand() << " "
@@ -344,47 +544,72 @@ static BlockState transferBlock(const BasicBlock &BB, const BlockState &In) {
   BlockState Current = In;
 
   for (const Instruction &I : BB) {
+    if (auto *AI = dyn_cast<AllocaInst>(&I)) {
+      Current[AI] = Box::top();
+      continue;
+    }
+
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      const Value *Slot = getMemorySlot(SI->getPointerOperand());
+      if (Slot)
+        Current[Slot] = getValueInterval(SI->getValueOperand(), Current);
+      continue;
+    }
+
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      const Value *Slot = getMemorySlot(LI->getPointerOperand());
+      if (Slot)
+        Current[&I] = getValueInterval(Slot, Current);
+      else
+        Current[&I] = Box::top();
+      continue;
+    }
+
     if (!I.getType()->isIntegerTy())
       continue;
 
-    Interval Result = Interval::top();
+    Box Result = Box::top();
 
     if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
-      Interval LHS = getValueInterval(BO->getOperand(0), Current);
-      Interval RHS = getValueInterval(BO->getOperand(1), Current);
+      Box LHS = getValueInterval(BO->getOperand(0), Current);
+      Box RHS = getValueInterval(BO->getOperand(1), Current);
       switch (BO->getOpcode()) {
       case Instruction::Add:
-        Result = addIntervals(LHS, RHS);
+        Result = addBoxes(LHS, RHS);
         break;
       case Instruction::Sub:
-        Result = subIntervals(LHS, RHS);
+        Result = subBoxes(LHS, RHS);
         break;
       case Instruction::Mul:
-        Result = mulIntervals(LHS, RHS);
+        Result = mulBoxes(LHS, RHS);
         break;
       default:
-        Result = Interval::top();
+        Result = Box::top();
         break;
       }
     } else if (auto *CI = dyn_cast<CastInst>(&I)) {
-      Interval Input = getValueInterval(CI->getOperand(0), Current);
-      Result = castInterval(*CI, Input);
+      Box Input = getValueInterval(CI->getOperand(0), Current);
+      Result = castBox(*CI, Input);
     } else if (auto *PN = dyn_cast<PHINode>(&I)) {
       // Path-insensitive phi handling by joining incoming value ranges.
       bool Initialized = false;
       for (unsigned Idx = 0; Idx < PN->getNumIncomingValues(); ++Idx) {
-        Interval Incoming = getValueInterval(PN->getIncomingValue(Idx), Current);
+        Box Incoming = getValueInterval(PN->getIncomingValue(Idx), Current);
         if (!Initialized) {
           Result = Incoming;
           Initialized = true;
         } else {
-          Result = joinIntervals(Result, Incoming);
+          Result = joinBoxes(Result, Incoming);
         }
       }
       if (!Initialized)
-        Result = Interval::top();
+        Result = Box::top();
+    } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
+      Box TrueValue = getValueInterval(SI->getTrueValue(), Current);
+      Box FalseValue = getValueInterval(SI->getFalseValue(), Current);
+      Result = joinBoxes(TrueValue, FalseValue);
     } else {
-      Result = Interval::top();
+      Result = Box::top();
     }
 
     Current[&I] = Result;
@@ -424,44 +649,134 @@ static std::string getStableValueName(const Value *V) {
   return "1_" + OS.str();
 }
 
-static void printOutState(const Function &F, const StateMap &Out) {
+static void printOutState(const Function &F, const StateMap &In,
+                          const StateMap &Out) {
   for (const BasicBlock &BB : F) {
     const BasicBlock *BBPtr = &BB;
-    outs() << "### Basic Block: ";
-    if (BB.hasName())
-      outs() << '%' << BB.getName();
-    else
-      outs() << "<unnamed>";
-    outs() << '\n';
 
-    outs() << "| Value | Interval |\n";
-    outs() << "|---|---|\n";
+    std::vector<std::pair<std::string, const Value *>> Keys;
+    auto InIt = In.find(BBPtr);
+    auto OutIt = Out.find(BBPtr);
+    if (InIt != In.end()) {
+      for (const auto &KV : InIt->second)
+        Keys.push_back({getStableValueName(KV.first), KV.first});
+    }
+    if (OutIt != Out.end()) {
+      for (const auto &KV : OutIt->second)
+        Keys.push_back({getStableValueName(KV.first), KV.first});
+    }
 
-    auto It = Out.find(BBPtr);
-    if (It == Out.end()) {
+    if (Keys.empty()) {
       outs() << '\n';
       continue;
     }
 
-    std::vector<std::pair<std::string, const Value *>> Keys;
-    Keys.reserve(It->second.size());
-    for (const auto &KV : It->second)
-      Keys.push_back({getStableValueName(KV.first), KV.first});
-
     llvm::sort(Keys, [](const auto &A, const auto &B) { return A.first < B.first; });
+    Keys.erase(std::unique(Keys.begin(), Keys.end(),
+                           [](const auto &A, const auto &B) {
+                             return A.first == B.first;
+                           }),
+               Keys.end());
+
+    std::vector<std::tuple<std::string, std::string, std::string>> Rows;
+    Rows.reserve(Keys.size());
+
+    size_t ValueWidth = 8;
+    size_t InWidth = 5;
+    size_t OutWidth = 6;
+
+    auto lookupBoxString = [&](const BlockState *State,
+                              const Value *V) -> std::string {
+      if (!State)
+        return "-";
+      auto It = State->find(V);
+      if (It == State->end())
+        return "-";
+      return It->second.str();
+    };
 
     for (const auto &Entry : Keys) {
       const Value *V = Entry.second;
-      auto Sit = It->second.find(V);
-      if (Sit == It->second.end())
-        continue;
-
       std::string VS;
       raw_string_ostream VOS(VS);
       V->printAsOperand(VOS, false);
 
-      outs() << "| " << VOS.str() << " | " << Sit->second.str() << " |\n";
+      std::string InText = lookupBoxString(InIt != In.end() ? &InIt->second : nullptr,
+                                          V);
+      std::string OutText = lookupBoxString(OutIt != Out.end() ? &OutIt->second : nullptr,
+                                            V);
+
+      Rows.emplace_back(VOS.str(), InText, OutText);
+      ValueWidth = std::max(ValueWidth, std::get<0>(Rows.back()).size());
+      InWidth = std::max(InWidth, std::get<1>(Rows.back()).size());
+      OutWidth = std::max(OutWidth, std::get<2>(Rows.back()).size());
     }
+
+    std::string Title;
+    raw_string_ostream TS(Title);
+    TS << " Basic Block: ";
+    if (BB.hasName())
+      TS << '%' << BB.getName();
+    else
+      TS << "<unnamed>";
+    TS << ' ';
+    TS.flush();
+
+    size_t TableWidth = ValueWidth + InWidth + OutWidth + 10;
+    size_t BannerWidth = std::max<size_t>(Title.size() + 4, TableWidth);
+
+    auto printLine = [&](char Fill) {
+      outs() << '+';
+      for (size_t I = 0; I < BannerWidth - 2; ++I)
+        outs() << Fill;
+      outs() << "+\n";
+    };
+
+    auto printCellRow = [&](StringRef Left, size_t LeftWidth, StringRef Middle,
+                            size_t MiddleWidth, StringRef Right,
+                            size_t RightWidth) {
+      outs() << "| " << Left;
+      for (size_t I = Left.size(); I < LeftWidth; ++I)
+        outs() << ' ';
+      outs() << " | " << Middle;
+      for (size_t I = Middle.size(); I < MiddleWidth; ++I)
+        outs() << ' ';
+      outs() << " | " << Right;
+      for (size_t I = Right.size(); I < RightWidth; ++I)
+        outs() << ' ';
+      size_t RowWidth = LeftWidth + MiddleWidth + RightWidth + 10;
+      for (size_t I = RowWidth; I < BannerWidth; ++I)
+        outs() << ' ';
+      outs() << " |\n";
+    };
+
+    printLine('-');
+    outs() << "| ";
+    outs() << Title;
+    for (size_t I = Title.size() + 3; I < BannerWidth; ++I)
+      outs() << ' ';
+    outs() << "|\n";
+    printLine('-');
+
+    printCellRow("Variable", ValueWidth, "BoxIn", InWidth, "BoxOut",
+                 OutWidth);
+    outs() << "| ";
+    for (size_t I = 0; I < ValueWidth; ++I)
+      outs() << '-';
+    outs() << " | ";
+    for (size_t I = 0; I < InWidth; ++I)
+      outs() << '-';
+    outs() << " | ";
+    for (size_t I = 0; I < OutWidth; ++I)
+      outs() << '-';
+    for (size_t I = ValueWidth + InWidth + OutWidth + 10; I < BannerWidth; ++I)
+      outs() << ' ';
+    outs() << " |\n";
+
+    for (const auto &Row : Rows)
+      printCellRow(std::get<0>(Row), ValueWidth, std::get<1>(Row), InWidth,
+                   std::get<2>(Row), OutWidth);
+
     outs() << '\n';
   }
 }
@@ -481,7 +796,7 @@ PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
   BlockState EntrySeed;
   for (const Argument &Arg : F.args()) {
     if (Arg.getType()->isIntegerTy())
-      EntrySeed[&Arg] = Interval::top();
+      EntrySeed[&Arg] = Box::top();
   }
 
   std::vector<const BasicBlock *> RPO = computeRPO(F);
@@ -542,7 +857,7 @@ PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
     }
   }
 
-  printOutState(F, OUT);
+  printOutState(F, IN, OUT);
 
   return PreservedAnalyses::all();
 }

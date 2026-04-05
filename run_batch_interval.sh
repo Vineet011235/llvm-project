@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: ./run_batch_interval.sh [-d <input-dir>] [-o <results-dir>] [-b <build-dir>] [-k] [-r]
-                             [-s|-S] [-f|-F] [-l|-L]
+                             [-N] [-m|-M] [-s|-S] [-f|-F] [-l|-L]
 
 Options:
   -d <dir>    Directory containing test files recursively (default: ./tests)
@@ -14,7 +14,10 @@ Options:
   -r          Force rebuild opt/clang with ninja before running
 
 Pre-Pass Running Flags:
-  -s          Enable sroa pre-pass (default: enabled)
+  -N          Disable all pre-passes (mem2reg, sroa, simplifycfg, loop-simplify)
+  -m          Enable mem2reg pre-pass (default: enabled)
+  -M          Disable mem2reg pre-pass
+  -s          Enable sroa pre-pass (default: disabled)
   -S          Disable sroa pre-pass
   -f          Enable simplifycfg pre-pass (default: enabled)
   -F          Disable simplifycfg pre-pass
@@ -30,17 +33,26 @@ INPUT_DIR="$ROOT_DIR/tests"
 OUTPUT_DIR="$ROOT_DIR/test-result"
 KEEP_IR=0
 FORCE_REBUILD=0
-PRE_SROA=1
+PRE_MEM2REG=1
+PRE_SROA=0
 PRE_SIMPLIFYCFG=1
 PRE_LOOP_SIMPLIFY=1
 
-while getopts ":d:o:b:krsSfFlLh" opt; do
+while getopts ":d:o:b:krNmMsSfFlLh" opt; do
   case "$opt" in
     d) INPUT_DIR="$OPTARG" ;;
     o) OUTPUT_DIR="$OPTARG" ;;
     b) BUILD_DIR="$OPTARG" ;;
     k) KEEP_IR=1 ;;
     r) FORCE_REBUILD=1 ;;
+    N)
+      PRE_MEM2REG=0
+      PRE_SROA=0
+      PRE_SIMPLIFYCFG=0
+      PRE_LOOP_SIMPLIFY=0
+      ;;
+    m) PRE_MEM2REG=1 ;;
+    M) PRE_MEM2REG=0 ;;
     s) PRE_SROA=1 ;;
     S) PRE_SROA=0 ;;
     f) PRE_SIMPLIFYCFG=1 ;;
@@ -74,6 +86,7 @@ SUCCESS=0
 FAIL=0
 
 echo "Pre-Pass Running:"
+echo "  mem2reg: $([[ "$PRE_MEM2REG" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  sroa: $([[ "$PRE_SROA" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  simplifycfg: $([[ "$PRE_SIMPLIFYCFG" -eq 1 ]] && echo enabled || echo disabled)"
 echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || echo disabled)"
@@ -82,16 +95,21 @@ for FILE in "${INPUTS[@]}"; do
   REL_PATH="${FILE#$INPUT_DIR/}"
   REL_NO_EXT="${REL_PATH%.*}"
   ARTIFACT_DIR="$OUTPUT_DIR/${REL_NO_EXT}"
-  OUT_FILE="$ARTIFACT_DIR/interval.out"
   mkdir -p "$ARTIFACT_DIR"
 
   declare -a SINGLE_ARGS
-  SINGLE_ARGS=(-i "$FILE" -o "$OUT_FILE" -a "$ARTIFACT_DIR" -b "$BUILD_DIR")
+  SINGLE_ARGS=(-i "$FILE" -a "$ARTIFACT_DIR" -b "$BUILD_DIR")
   if [[ "$KEEP_IR" -eq 1 ]]; then
     SINGLE_ARGS+=("-k")
   fi
   if [[ "$FORCE_REBUILD" -eq 1 ]]; then
     SINGLE_ARGS+=("-r")
+  fi
+  if [[ "$PRE_MEM2REG" -eq 0 ]]; then
+    SINGLE_ARGS+=("-M")
+  fi
+  if [[ "$PRE_SROA" -eq 1 ]]; then
+    SINGLE_ARGS+=("-s")
   fi
   if [[ "$PRE_SROA" -eq 0 ]]; then
     SINGLE_ARGS+=("-S")
