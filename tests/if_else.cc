@@ -1,9 +1,10 @@
 int main(int argc, char **argv) {
   int x = 0;
   if (argc > 1) {
-    x = 1;
+    x = argc + 100;
   } else {
-    x = 2;
+    x = argc - 200;
   }
-  return x;
+  int y = x + 50;
+  return 0;
 }

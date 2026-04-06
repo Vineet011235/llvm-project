@@ -536,6 +536,60 @@ static Box mulBoxes(const Box &A, const Box &B) {
   return Result;
 }
 
+static std::optional<Bound> safeDiv(Bound A, Bound B) {
+  if (B == 0)
+    return std::nullopt;
+  if (A == std::numeric_limits<Bound>::min() && B == -1)
+    return std::nullopt;
+  return A / B;
+}
+
+static Interval divIntervals(const Interval &A, const Interval &B) {
+  bool ContainsZero = true;
+  if (B.Lower.has_value() && B.Upper.has_value()) {
+    ContainsZero = (*B.Lower <= 0 && *B.Upper >= 0);
+  } else if (B.Lower.has_value()) {
+    ContainsZero = (*B.Lower <= 0);
+  } else if (B.Upper.has_value()) {
+    ContainsZero = (*B.Upper >= 0);
+  }
+
+  if (ContainsZero)
+    return Interval::top();
+
+  if (A.Lower.has_value() && A.Upper.has_value() && B.Lower.has_value() &&
+      B.Upper.has_value()) {
+    std::optional<Bound> C1 = safeDiv(*A.Lower, *B.Lower);
+    std::optional<Bound> C2 = safeDiv(*A.Lower, *B.Upper);
+    std::optional<Bound> C3 = safeDiv(*A.Upper, *B.Lower);
+    std::optional<Bound> C4 = safeDiv(*A.Upper, *B.Upper);
+
+    if (C1.has_value() && C2.has_value() && C3.has_value() && C4.has_value()) {
+      Bound MinV = std::min({*C1, *C2, *C3, *C4});
+      Bound MaxV = std::max({*C1, *C2, *C3, *C4});
+      return Interval{MinV, MaxV};
+    }
+  }
+
+  return Interval::top();
+}
+
+static Box divBoxes(const Box &A, const Box &B) {
+  std::vector<Interval> ResultIntervals;
+  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
+  for (const Interval &IA : A.Intervals) {
+    for (const Interval &IB : B.Intervals) {
+      Interval R = divIntervals(IA, IB);
+      if (R.isTop())
+        return Box::top();
+      ResultIntervals.push_back(R);
+    }
+  }
+  Box Result{std::move(ResultIntervals)};
+  Result.normalize();
+  return Result;
+}
+
 static Box castBox(const CastInst &CI, const Box &Input) {
   std::vector<Interval> ResultIntervals;
   ResultIntervals.reserve(Input.Intervals.size());
@@ -552,22 +606,6 @@ static Box castBox(const CastInst &CI, const Box &Input) {
 
 static const Value *getMemorySlot(const Value *Ptr) {
   return Ptr ? Ptr->stripPointerCasts() : nullptr;
-}
-
-static void applySuccessorPhiEdges(const BasicBlock &BB, BlockState &State) {
-  for (const BasicBlock *Succ : successors(&BB)) {
-    for (const Instruction &SuccInst : *Succ) {
-      const auto *Phi = dyn_cast<PHINode>(&SuccInst);
-      if (!Phi)
-        break;
-
-      const Value *IncomingValue = Phi->getIncomingValueForBlock(&BB);
-      if (!IncomingValue)
-        continue;
-
-      State[Phi] = getValueInterval(IncomingValue, State);
-    }
-  }
 }
 
 static bool statesEqual(const BlockState &A, const BlockState &B) {
@@ -684,22 +722,28 @@ static std::optional<BlockState> refinePredecessorForEdge(const BasicBlock *Pred
   return Refined;
 }
 
-static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
-                                      const BlockState &EntrySeed,
-                                      bool IsEntry) {
+static std::pair<BlockState, bool> mergePredecessorOut(
+    const BasicBlock *BB, const StateMap &Out, const BlockState &EntrySeed,
+    bool IsEntry, const DenseSet<const BasicBlock *> &ReachableBlocks) {
+  
   BlockState In;
+  bool IsReachable = false;
   bool HasAnyPredState = false;
 
   for (const BasicBlock *Pred : predecessors(BB)) {
+    // If the predecessor itself is dead, it cannot send data.
+    if (!ReachableBlocks.contains(Pred)) continue;
+
     auto PredOutIt = Out.find(Pred);
-    if (PredOutIt == Out.end())
-      continue;
+    if (PredOutIt == Out.end()) continue;
 
     std::optional<BlockState> RefinedPredState =
         refinePredecessorForEdge(Pred, BB, PredOutIt->second);
-    if (!RefinedPredState.has_value())
-      continue;
+    
+    // If the branch constraint is infeasible, the edge is dead.
+    if (!RefinedPredState.has_value()) continue;
 
+    IsReachable = true;
     const BlockState &PredOut = *RefinedPredState;
     if (!HasAnyPredState) {
       In = PredOut;
@@ -717,8 +761,8 @@ static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
   }
 
   if (IsEntry) {
-    if (!HasAnyPredState)
-      return EntrySeed;
+    IsReachable = true;
+    if (!HasAnyPredState) return {EntrySeed, true};
 
     for (const auto &KV : EntrySeed) {
       auto It = In.find(KV.first);
@@ -729,7 +773,7 @@ static BlockState mergePredecessorOut(const BasicBlock *BB, const StateMap &Out,
     }
   }
 
-  return In;
+  return {In, IsReachable};
 }
 
 static BlockState widenState(const BlockState &OldState, const BlockState &NewState,
@@ -755,8 +799,7 @@ static BlockState widenState(const BlockState &OldState, const BlockState &NewSt
   return Result;
 }
 
-static BlockState narrowState(const BlockState &OldState,
-                              const BlockState &NewState,
+static BlockState narrowState(const BlockState &OldState, const BlockState &NewState,
                               const BasicBlock *BB) {
   BlockState Result = OldState;
 
@@ -805,6 +848,20 @@ static BlockState transferBlock(const BasicBlock &BB, const BlockState &In,
       continue;
     }
 
+    if (auto *Call = dyn_cast<CallBase>(&I)) {
+      for (Value *Arg : Call->args()) {
+        if (!Arg->getType()->isPointerTy())
+          continue;
+
+        if (const Value *Slot = getMemorySlot(Arg))
+          Current[Slot] = Box::top();
+      }
+
+      if (Call->getType()->isIntegerTy())
+        Current[&I] = Box::top();
+      continue;
+    }
+
     if (!I.getType()->isIntegerTy())
       continue;
 
@@ -823,6 +880,9 @@ static BlockState transferBlock(const BasicBlock &BB, const BlockState &In,
       case Instruction::Mul:
         Result = mulBoxes(LHS, RHS);
         break;
+      case Instruction::SDiv:
+        Result = divBoxes(LHS, RHS);
+        break;
       default:
         Result = Box::top();
         break;
@@ -830,10 +890,35 @@ static BlockState transferBlock(const BasicBlock &BB, const BlockState &In,
     } else if (auto *CI = dyn_cast<CastInst>(&I)) {
       Box Input = getValueInterval(CI->getOperand(0), Current);
       Result = castBox(*CI, Input);
-    } else if (isa<PHINode>(&I)) {
-      // PHI values are attached to predecessor edges. The current block keeps
-      // the merged value from IN, so the PHI instruction itself is skipped.
-      Result = getValueInterval(&I, Current);
+    } else if (auto *Phi = dyn_cast<PHINode>(&I)) {
+      Box PhiResult;
+      bool First = true;
+      for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
+        const BasicBlock *Pred = Phi->getIncomingBlock(i);
+        const Value *IncVal = Phi->getIncomingValue(i);
+
+        auto PredOutIt = Out.find(Pred);
+        if (PredOutIt == Out.end()) continue;
+
+        std::optional<BlockState> RefinedState = refinePredecessorForEdge(Pred, &BB, PredOutIt->second);
+        if (!RefinedState) continue;
+
+        Box IncBox = getValueInterval(IncVal, *RefinedState);
+        if (First) {
+          PhiResult = IncBox;
+          First = false;
+        } else {
+          PhiResult = joinBoxes(PhiResult, IncBox);
+        }
+      }
+      
+      // FIX: If no predecessors have been visited yet, skip assigning TOP.
+      // Leave it out of the Current map so it acts as an implicit BOTTOM.
+      if (First) {
+        continue;
+      } else {
+        Result = PhiResult;
+      }
     } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
       Box TrueValue = getValueInterval(SI->getTrueValue(), Current);
       Box FalseValue = getValueInterval(SI->getFalseValue(), Current);
@@ -857,7 +942,6 @@ static std::vector<const BasicBlock *> computeRPO(const Function &F) {
   for (const BasicBlock *BB : RPO)
     Order.push_back(BB);
 
-  // Add unreachable blocks in function order to keep deterministic traversal.
   for (const BasicBlock &BB : F) {
     const BasicBlock *BBPtr = &BB;
     if (std::find(Order.begin(), Order.end(), BBPtr) == Order.end())
@@ -914,7 +998,7 @@ static void printOutState(const Function &F, const StateMap &In,
     size_t OutWidth = 6;
 
     auto lookupBoxString = [&](const BlockState *State,
-                              const Value *V) -> std::string {
+                               const Value *V) -> std::string {
       if (!State)
         return "-";
       auto It = State->find(V);
@@ -929,10 +1013,8 @@ static void printOutState(const Function &F, const StateMap &In,
       raw_string_ostream VOS(VS);
       V->printAsOperand(VOS, false);
 
-      std::string InText = lookupBoxString(InIt != In.end() ? &InIt->second : nullptr,
-                                          V);
-      std::string OutText = lookupBoxString(OutIt != Out.end() ? &OutIt->second : nullptr,
-                                            V);
+      std::string InText = lookupBoxString(InIt != In.end() ? &InIt->second : nullptr, V);
+      std::string OutText = lookupBoxString(OutIt != Out.end() ? &OutIt->second : nullptr, V);
 
       Rows.emplace_back(VOS.str(), InText, OutText);
       ValueWidth = std::max(ValueWidth, std::get<0>(Rows.back()).size());
@@ -1013,149 +1095,119 @@ static void printOutState(const Function &F, const StateMap &In,
 
 PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
                                                   FunctionAnalysisManager &AM) {
-  if (!EnableIntervalAnalysis)
-    return PreservedAnalyses::all();
+  if (!EnableIntervalAnalysis) return PreservedAnalyses::all();
 
   LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
-
   StateMap IN;
   StateMap OUT;
-
   BlockState EntrySeed;
+
   for (const Argument &Arg : F.args()) {
-    if (Arg.getType()->isIntegerTy())
-      EntrySeed[&Arg] = Box::top();
+    if (Arg.getType()->isIntegerTy()) EntrySeed[&Arg] = Box::top();
   }
 
   std::vector<const BasicBlock *> RPO = computeRPO(F);
+  DenseSet<const BasicBlock *> ReachableBlocks; // <--- ADDED
+
+  // ==========================================
+  // PHASE 1: Fixpoint Evaluation with Widening
+  // ==========================================
   std::deque<const BasicBlock *> Worklist;
   DenseSet<const BasicBlock *> InWorklist;
   DenseMap<const BasicBlock *, unsigned> VisitCount;
-  for (const BasicBlock *BB : RPO)
-    Worklist.push_back(BB), InWorklist.insert(BB);
+
+  for (const BasicBlock *BB : RPO) {
+    Worklist.push_back(BB);
+    InWorklist.insert(BB);
+  }
 
   const BasicBlock *EntryBB = F.empty() ? nullptr : &F.getEntryBlock();
+  unsigned MaxPhase1Iters = 10000;
+  unsigned Iters = 0;
 
-  while (!Worklist.empty()) {
+  while (!Worklist.empty() && Iters++ < MaxPhase1Iters) {
     const BasicBlock *BB = Worklist.front();
     Worklist.pop_front();
     InWorklist.erase(BB);
     unsigned ThisVisit = ++VisitCount[BB];
-    LLVM_DEBUG(dbgs() << "[interval] process block " << BB->getName() << "\n");
 
-    BlockState NewIn = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
-
-    if (LI.isLoopHeader(BB)) {
-      auto OldInIt = IN.find(BB);
-      if (ThisVisit > 2 && OldInIt != IN.end()) {
-        LLVM_DEBUG(dbgs() << "[interval] apply widening in loop header "
-                          << BB->getName() << " visit=" << ThisVisit << "\n");
-        NewIn = widenState(OldInIt->second, NewIn, BB);
-      } else {
-        LLVM_DEBUG(dbgs() << "[interval] skip widening in loop header "
-                          << BB->getName() << " visit=" << ThisVisit << "\n");
-      }
-    }
-
+    // Get IN state and reachability
+    auto [NewIn, IsReachable] = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB, ReachableBlocks);
     IN[BB] = NewIn;
 
-    BlockState NewOut = transferBlock(*BB, NewIn, OUT);
-    applySuccessorPhiEdges(*BB, NewOut);
+    BlockState NewOut;
+    
+    // Only evaluate instructions if the block is actually reachable!
+    if (IsReachable) {
+      ReachableBlocks.insert(BB);
+      NewOut = transferBlock(*BB, NewIn, OUT);
+
+      if (LI.isLoopHeader(BB) && ThisVisit > 2) {
+        auto OldOutIt = OUT.find(BB);
+        if (OldOutIt != OUT.end()) {
+          NewOut = widenState(OldOutIt->second, NewOut, BB);
+        }
+      }
+    } else {
+      ReachableBlocks.erase(BB);
+      // NewOut remains mathematically empty (BOT)
+    }
 
     auto OldOutIt = OUT.find(BB);
     if (OldOutIt == OUT.end() || !statesEqual(NewOut, OldOutIt->second)) {
       OUT[BB] = std::move(NewOut);
       for (const BasicBlock *Succ : successors(BB)) {
-        if (InWorklist.insert(Succ).second)
-          Worklist.push_back(Succ);
+        if (InWorklist.insert(Succ).second) Worklist.push_back(Succ);
       }
     }
   }
 
-  // Bounded narrowing sweeps over loop headers.
+  // ==========================================
+  // PHASE 2: Bounded Narrowing Pass
+  // ==========================================
+  for (const BasicBlock *BB : RPO) {
+    Worklist.push_back(BB);
+    InWorklist.insert(BB);
+  }
+
   constexpr unsigned MaxNarrowingSweeps = 5;
   for (unsigned Sweep = 0; Sweep < MaxNarrowingSweeps; ++Sweep) {
     bool AnyChanged = false;
+    for (const BasicBlock *BB : RPO) {
 
-    for (const BasicBlock &BBRef : F) {
-      const BasicBlock *BB = &BBRef;
-      if (!LI.isLoopHeader(BB))
-        continue;
+      auto [NewIn, IsReachable] = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB, ReachableBlocks);
 
-      BlockState MergedIn =
-          mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
+      bool InChanged = false;
       auto OldInIt = IN.find(BB);
-      BlockState NarrowIn =
-          OldInIt != IN.end() ? narrowState(OldInIt->second, MergedIn, BB)
-                              : std::move(MergedIn);
+      if (OldInIt == IN.end() || !statesEqual(NewIn, OldInIt->second)) {
+        InChanged = true;
+        IN[BB] = NewIn;
+      }
 
-      BlockState NarrowOut = transferBlock(*BB, NarrowIn, OUT);
-      applySuccessorPhiEdges(*BB, NarrowOut);
+      BlockState NewOut;
+      if (IsReachable) {
+        ReachableBlocks.insert(BB);
+        NewOut = transferBlock(*BB, NewIn, OUT);
 
-      bool InChanged = true;
-      auto InIt = IN.find(BB);
-      if (InIt != IN.end())
-        InChanged = !statesEqual(NarrowIn, InIt->second);
+        if (LI.isLoopHeader(BB)) {
+          auto OldOutIt = OUT.find(BB);
+          if (OldOutIt != OUT.end()) {
+            NewOut = narrowState(OldOutIt->second, NewOut, BB);
+          }
+        }
+      } else {
+        ReachableBlocks.erase(BB);
+      }
 
-      bool OutChanged = true;
-      auto OutIt = OUT.find(BB);
-      if (OutIt != OUT.end())
-        OutChanged = !statesEqual(NarrowOut, OutIt->second);
-
-      if (InChanged || OutChanged) {
-        LLVM_DEBUG(dbgs() << "[interval] narrowing update in loop header "
-                          << BB->getName() << " sweep=" << (Sweep + 1)
-                          << "\n");
-        IN[BB] = std::move(NarrowIn);
-        OUT[BB] = std::move(NarrowOut);
+      auto OldOutIt = OUT.find(BB);
+      if (OldOutIt == OUT.end() || !statesEqual(NewOut, OldOutIt->second)) {
+        OUT[BB] = std::move(NewOut);
         AnyChanged = true;
       }
     }
-
-    if (!AnyChanged)
-      break;
-  }
-
-  // Recompute a no-widening fixpoint so narrowed header facts propagate to
-  // the rest of the CFG (e.g. loop exits) instead of leaving stale states.
-  std::deque<const BasicBlock *> PropagateWorklist;
-  DenseSet<const BasicBlock *> InPropagateWorklist;
-  for (const BasicBlock *BB : RPO)
-    PropagateWorklist.push_back(BB), InPropagateWorklist.insert(BB);
-
-  while (!PropagateWorklist.empty()) {
-    const BasicBlock *BB = PropagateWorklist.front();
-    PropagateWorklist.pop_front();
-    InPropagateWorklist.erase(BB);
-
-    BlockState NewIn = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
-
-    bool InChanged = true;
-    auto OldInIt = IN.find(BB);
-    if (OldInIt != IN.end())
-      InChanged = !statesEqual(NewIn, OldInIt->second);
-
-    if (InChanged)
-      IN[BB] = NewIn;
-
-    BlockState NewOut = transferBlock(*BB, NewIn, OUT);
-    applySuccessorPhiEdges(*BB, NewOut);
-
-    bool OutChanged = true;
-    auto OldOutIt = OUT.find(BB);
-    if (OldOutIt != OUT.end())
-      OutChanged = !statesEqual(NewOut, OldOutIt->second);
-
-    if (OutChanged) {
-      OUT[BB] = std::move(NewOut);
-      for (const BasicBlock *Succ : successors(BB)) {
-        if (InPropagateWorklist.insert(Succ).second)
-          PropagateWorklist.push_back(Succ);
-      }
-    }
+    if (!AnyChanged) break;
   }
 
   printOutState(F, IN, OUT);
-
   return PreservedAnalyses::all();
 }

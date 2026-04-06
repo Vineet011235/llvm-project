@@ -1,9 +1,11 @@
-#include <iostream>
-
-int main(){
-  int a = 10;
-  for (int i = 0; i < 5; ++i) {
-    a += 1;
+int main(int argc, char **argv) {
+  int x = argc;
+  int y = 0;
+  if (x > 5) {
+    y = x + 2;
+  } else {
+    y = x - 2;
   }
-  return 0;
+  y += 1;
+  return y ^ (argv != nullptr);
 }

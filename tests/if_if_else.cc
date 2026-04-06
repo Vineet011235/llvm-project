@@ -7,5 +7,6 @@ int main(int argc, char **argv) {
   } else {
     x = 8;
   }
+  int y = x + 50;
   return x;
 }

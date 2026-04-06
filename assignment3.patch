@@ -1,0 +1,1970 @@
+diff --git a/.gitignore b/.gitignore
+index 85b5caa16212..bd2ef17ef94f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,6 +29,9 @@
+ # Nested build directory
+ /build*
+ 
++# Local test output directory
++/test-results
++
+ #==============================================================================#
+ # Explicit files to ignore (only matches one).
+ #==============================================================================#
+diff --git a/example.cc b/example.cc
+new file mode 100644
+index 000000000000..76d166376c4f
+--- /dev/null
++++ b/example.cc
+@@ -0,0 +1,11 @@
++int main(int argc, char **argv) {
++  int x = argc;
++  int y = 0;
++  if (x > 5) {
++    y = x + 2;
++  } else {
++    y = x - 2;
++  }
++  y += 1;
++  return y ^ (argv != nullptr);
++}
+diff --git a/llvm/include/llvm/Analysis/CustomIntervalAnalysis.h b/llvm/include/llvm/Analysis/CustomIntervalAnalysis.h
+new file mode 100644
+index 000000000000..5ffe3f784ffe
+--- /dev/null
++++ b/llvm/include/llvm/Analysis/CustomIntervalAnalysis.h
+@@ -0,0 +1,26 @@
++//===- CustomIntervalAnalysis.h - Block interval analysis ------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_ANALYSIS_CUSTOMINTERVALANALYSIS_H
++#define LLVM_ANALYSIS_CUSTOMINTERVALANALYSIS_H
++
++#include "llvm/IR/PassManager.h"
++
++namespace llvm {
++
++class CustomIntervalAnalysisPass
++    : public PassInfoMixin<CustomIntervalAnalysisPass> {
++public:
++  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
++  static StringRef name() { return "CustomIntervalAnalysisPass"; }
++  static bool isRequired() { return true; }
++};
++
++} // namespace llvm
++
++#endif // LLVM_ANALYSIS_CUSTOMINTERVALANALYSIS_H
+diff --git a/llvm/lib/Analysis/CMakeLists.txt b/llvm/lib/Analysis/CMakeLists.txt
+index 9abdca099d9f..39656365a5da 100644
+--- a/llvm/lib/Analysis/CMakeLists.txt
++++ b/llvm/lib/Analysis/CMakeLists.txt
+@@ -58,6 +58,7 @@ add_llvm_component_library(LLVMAnalysis
+   CodeMetrics.cpp
+   ConstantFolding.cpp
+   CtxProfAnalysis.cpp
++  CustomIntervalAnalysis.cpp
+   CycleAnalysis.cpp
+   DDG.cpp
+   DDGPrinter.cpp
+diff --git a/llvm/lib/Analysis/CustomIntervalAnalysis.cpp b/llvm/lib/Analysis/CustomIntervalAnalysis.cpp
+new file mode 100644
+index 000000000000..284a73f515d7
+--- /dev/null
++++ b/llvm/lib/Analysis/CustomIntervalAnalysis.cpp
+@@ -0,0 +1,1213 @@
++//===- CustomIntervalAnalysis.cpp - Block interval analysis --------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Analysis/CustomIntervalAnalysis.h"
++
++#include "llvm/ADT/APInt.h"
++#include "llvm/ADT/DenseSet.h"
++#include "llvm/ADT/DenseMap.h"
++#include "llvm/ADT/PostOrderIterator.h"
++#include "llvm/Analysis/LoopInfo.h"
++#include "llvm/IR/Argument.h"
++#include "llvm/IR/BasicBlock.h"
++#include "llvm/IR/CFG.h"
++#include "llvm/IR/Constants.h"
++#include "llvm/IR/Function.h"
++#include "llvm/IR/Instruction.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/Value.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <string>
++#include <deque>
++#include <utility>
++#include <vector>
++
++#define DEBUG_TYPE "interval-analysis"
++
++using namespace llvm;
++
++namespace {
++
++using Bound = int64_t;
++
++struct Interval {
++  std::optional<Bound> Lower;
++  std::optional<Bound> Upper;
++
++  static Interval top() { return Interval{std::nullopt, std::nullopt}; }
++
++  static Interval constant(Bound V) { return Interval{V, V}; }
++
++  bool isTop() const { return !Lower.has_value() && !Upper.has_value(); }
++
++  bool isConstant() const {
++    return Lower.has_value() && Upper.has_value() && *Lower == *Upper;
++  }
++
++  bool operator==(const Interval &Other) const {
++    return Lower == Other.Lower && Upper == Other.Upper;
++  }
++
++  bool operator!=(const Interval &Other) const { return !(*this == Other); }
++
++  std::string str() const {
++    if (isConstant())
++      return "{" + std::to_string(*Lower) + "}";
++
++    std::string S;
++    raw_string_ostream OS(S);
++    OS << '[';
++    if (Lower.has_value())
++      OS << *Lower;
++    else
++      OS << "-INF";
++    OS << ", ";
++    if (Upper.has_value())
++      OS << *Upper;
++    else
++      OS << "INF";
++    OS << ']';
++    return S;
++  }
++};
++
++struct Box {
++  std::vector<Interval> Intervals;
++
++  static Box top() { return Box{{Interval::top()}}; }
++
++  static Box constant(Bound V) { return Box{{Interval::constant(V)}}; }
++
++  bool isTop() const {
++    return Intervals.size() == 1 && Intervals.front().isTop();
++  }
++
++  static int compareLower(const std::optional<Bound> &A,
++                          const std::optional<Bound> &B) {
++    if (!A.has_value() && !B.has_value())
++      return 0;
++    if (!A.has_value())
++      return -1;
++    if (!B.has_value())
++      return 1;
++    if (*A < *B)
++      return -1;
++    if (*A > *B)
++      return 1;
++    return 0;
++  }
++
++  static int compareUpper(const std::optional<Bound> &A,
++                          const std::optional<Bound> &B) {
++    if (!A.has_value() && !B.has_value())
++      return 0;
++    if (!A.has_value())
++      return 1;
++    if (!B.has_value())
++      return -1;
++    if (*A < *B)
++      return -1;
++    if (*A > *B)
++      return 1;
++    return 0;
++  }
++
++  static std::optional<Bound> minLower(const std::optional<Bound> &A,
++                                       const std::optional<Bound> &B) {
++    return compareLower(A, B) <= 0 ? A : B;
++  }
++
++  static std::optional<Bound> maxUpper(const std::optional<Bound> &A,
++                                       const std::optional<Bound> &B) {
++    return compareUpper(A, B) >= 0 ? A : B;
++  }
++
++  static bool overlapsOrTouches(const Interval &A, const Interval &B) {
++    if (!A.Upper.has_value() || !B.Lower.has_value())
++      return true;
++    if (*B.Lower <= *A.Upper)
++      return true;
++
++    if (*A.Upper == std::numeric_limits<Bound>::max())
++      return false;
++    return *B.Lower <= (*A.Upper + 1);
++  }
++
++  void normalize() {
++    if (Intervals.empty()) {
++      Intervals.push_back(Interval::top());
++      return;
++    }
++
++    llvm::sort(Intervals, [](const Interval &A, const Interval &B) {
++      int CmpLower = compareLower(A.Lower, B.Lower);
++      if (CmpLower != 0)
++        return CmpLower < 0;
++      return compareUpper(A.Upper, B.Upper) < 0;
++    });
++
++    std::vector<Interval> Merged;
++    Merged.reserve(Intervals.size());
++    Merged.push_back(Intervals.front());
++
++    for (size_t I = 1; I < Intervals.size(); ++I) {
++      Interval &Last = Merged.back();
++      const Interval &Cur = Intervals[I];
++      if (overlapsOrTouches(Last, Cur)) {
++        Last.Lower = minLower(Last.Lower, Cur.Lower);
++        Last.Upper = maxUpper(Last.Upper, Cur.Upper);
++      } else {
++        Merged.push_back(Cur);
++      }
++    }
++
++    Intervals = std::move(Merged);
++  }
++
++  static Box fromInterval(const Interval &I) {
++    Box B{{I}};
++    B.normalize();
++    return B;
++  }
++
++  static Box unite(const Box &A, const Box &B) {
++    Box Result;
++    Result.Intervals.reserve(A.Intervals.size() + B.Intervals.size());
++    Result.Intervals.insert(Result.Intervals.end(), A.Intervals.begin(),
++                            A.Intervals.end());
++    Result.Intervals.insert(Result.Intervals.end(), B.Intervals.begin(),
++                            B.Intervals.end());
++    Result.normalize();
++    return Result;
++  }
++
++  Interval hull() const {
++    if (Intervals.empty())
++      return Interval::top();
++
++    Interval Result = Intervals.front();
++    for (size_t I = 1; I < Intervals.size(); ++I) {
++      Result.Lower = minLower(Result.Lower, Intervals[I].Lower);
++      Result.Upper = maxUpper(Result.Upper, Intervals[I].Upper);
++    }
++    return Result;
++  }
++
++  bool operator==(const Box &Other) const {
++    return Intervals == Other.Intervals;
++  }
++
++  bool operator!=(const Box &Other) const { return !(*this == Other); }
++
++  std::string str() const {
++    std::string S;
++    raw_string_ostream OS(S);
++    for (size_t I = 0; I < Intervals.size(); ++I) {
++      if (I != 0)
++        OS << " U ";
++      OS << Intervals[I].str();
++    }
++    return S;
++  }
++};
++
++using BlockState = DenseMap<const Value *, Box>;
++using StateMap = DenseMap<const BasicBlock *, BlockState>;
++
++static cl::opt<bool> EnableIntervalAnalysis(
++    "df-interval",
++    cl::desc("Enable interval analysis execution details (compat flag)"),
++    cl::init(true), cl::Hidden);
++
++static std::optional<Bound> safeAdd(Bound A, Bound B) {
++  if ((B > 0 && A > std::numeric_limits<Bound>::max() - B) ||
++      (B < 0 && A < std::numeric_limits<Bound>::min() - B))
++    return std::nullopt;
++  return A + B;
++}
++
++static std::optional<Bound> safeSub(Bound A, Bound B) {
++  if ((B > 0 && A < std::numeric_limits<Bound>::min() + B) ||
++      (B < 0 && A > std::numeric_limits<Bound>::max() + B))
++    return std::nullopt;
++  return A - B;
++}
++
++static std::optional<Bound> safeMul(Bound A, Bound B) {
++  bool Overflow = false;
++  APInt LHS(64, static_cast<uint64_t>(A), true);
++  APInt RHS(64, static_cast<uint64_t>(B), true);
++  APInt Product = LHS.smul_ov(RHS, Overflow);
++  if (Overflow)
++    return std::nullopt;
++  return Product.getSExtValue();
++}
++
++static Interval widenInterval(const Interval &OldI, const Interval &NewI) {
++  Interval Result = OldI;
++
++  if (!OldI.Lower.has_value()) {
++    Result.Lower = std::nullopt;
++  } else if (!NewI.Lower.has_value() || *NewI.Lower < *OldI.Lower) {
++    Result.Lower = std::nullopt;
++  } else {
++    Result.Lower = OldI.Lower;
++  }
++
++  if (!OldI.Upper.has_value()) {
++    Result.Upper = std::nullopt;
++  } else if (!NewI.Upper.has_value() || *NewI.Upper > *OldI.Upper) {
++    Result.Upper = std::nullopt;
++  } else {
++    Result.Upper = OldI.Upper;
++  }
++
++  return Result;
++}
++
++static Interval narrowInterval(const Interval &OldI, const Interval &NewI) {
++  Interval Result = OldI;
++  Result.Lower = OldI.Lower.has_value() ? OldI.Lower : NewI.Lower;
++  Result.Upper = OldI.Upper.has_value() ? OldI.Upper : NewI.Upper;
++  return Result;
++}
++
++static bool tryGetInt64Constant(const Value *V, Bound &Out) {
++  auto *CI = dyn_cast<ConstantInt>(V);
++  if (!CI)
++    return false;
++
++  const APInt &Val = CI->getValue();
++  if (Val.getBitWidth() > 64)
++    return false;
++
++  Out = Val.getSExtValue();
++  return true;
++}
++
++static Box getValueInterval(const Value *V, const BlockState &State) {
++  Bound C = 0;
++  if (tryGetInt64Constant(V, C))
++    return Box::constant(C);
++
++  auto It = State.find(V);
++  if (It != State.end())
++    return It->second;
++
++  if (V->getType()->isIntegerTy())
++    return Box::top();
++
++  return Box::top();
++}
++
++static Interval addIntervals(const Interval &A, const Interval &B) {
++  std::optional<Bound> Lower = std::nullopt;
++  std::optional<Bound> Upper = std::nullopt;
++
++  if (A.Lower.has_value() && B.Lower.has_value()) {
++    Lower = safeAdd(*A.Lower, *B.Lower);
++    if (!Lower.has_value())
++      return Interval::top();
++  }
++
++  if (A.Upper.has_value() && B.Upper.has_value()) {
++    Upper = safeAdd(*A.Upper, *B.Upper);
++    if (!Upper.has_value())
++      return Interval::top();
++  }
++
++  return Interval{Lower, Upper};
++}
++
++static Interval subIntervals(const Interval &A, const Interval &B) {
++  std::optional<Bound> Lower = std::nullopt;
++  std::optional<Bound> Upper = std::nullopt;
++
++  if (A.Lower.has_value() && B.Upper.has_value()) {
++    Lower = safeSub(*A.Lower, *B.Upper);
++    if (!Lower.has_value())
++      return Interval::top();
++  }
++
++  if (A.Upper.has_value() && B.Lower.has_value()) {
++    Upper = safeSub(*A.Upper, *B.Lower);
++    if (!Upper.has_value())
++      return Interval::top();
++  }
++
++  return Interval{Lower, Upper};
++}
++
++static Interval mulIntervals(const Interval &A, const Interval &B) {
++  auto scaleByConstant = [](const Interval &I, Bound C) -> Interval {
++    if (C == 0)
++      return Interval::constant(0);
++
++    std::optional<Bound> Lower = std::nullopt;
++    std::optional<Bound> Upper = std::nullopt;
++
++    if (C > 0) {
++      if (I.Lower.has_value()) {
++        Lower = safeMul(*I.Lower, C);
++        if (!Lower.has_value())
++          return Interval::top();
++      }
++      if (I.Upper.has_value()) {
++        Upper = safeMul(*I.Upper, C);
++        if (!Upper.has_value())
++          return Interval::top();
++      }
++    } else {
++      if (I.Upper.has_value()) {
++        Lower = safeMul(*I.Upper, C);
++        if (!Lower.has_value())
++          return Interval::top();
++      }
++      if (I.Lower.has_value()) {
++        Upper = safeMul(*I.Lower, C);
++        if (!Upper.has_value())
++          return Interval::top();
++      }
++    }
++
++    return Interval{Lower, Upper};
++  };
++
++  if (A.isConstant())
++    return scaleByConstant(B, *A.Lower);
++  if (B.isConstant())
++    return scaleByConstant(A, *B.Lower);
++
++  if (!A.Lower.has_value() || !A.Upper.has_value() || !B.Lower.has_value() ||
++      !B.Upper.has_value())
++    return Interval::top();
++
++  std::optional<Bound> C1 = safeMul(*A.Lower, *B.Lower);
++  std::optional<Bound> C2 = safeMul(*A.Lower, *B.Upper);
++  std::optional<Bound> C3 = safeMul(*A.Upper, *B.Lower);
++  std::optional<Bound> C4 = safeMul(*A.Upper, *B.Upper);
++  if (!C1.has_value() || !C2.has_value() || !C3.has_value() || !C4.has_value())
++    return Interval::top();
++
++  Bound Lower = std::min(std::min(*C1, *C2), std::min(*C3, *C4));
++  Bound Upper = std::max(std::max(*C1, *C2), std::max(*C3, *C4));
++  return Interval{Lower, Upper};
++}
++
++static Interval castInterval(const CastInst &CI, const Interval &Input) {
++  if (Input.isTop())
++    return Input;
++
++  auto *SrcTy = dyn_cast<IntegerType>(CI.getSrcTy());
++  auto *DstTy = dyn_cast<IntegerType>(CI.getDestTy());
++  if (!SrcTy || !DstTy)
++    return Interval::top();
++
++  if (!Input.Lower.has_value() || !Input.Upper.has_value())
++    return Interval::top();
++
++  auto convertSigned = [&](Bound V) -> std::optional<Bound> {
++    APInt Value(SrcTy->getBitWidth(), static_cast<uint64_t>(V), true);
++    APInt Converted = Value;
++    if (CI.getOpcode() == Instruction::SExt)
++      Converted = Value.sext(DstTy->getBitWidth());
++    else if (CI.getOpcode() == Instruction::ZExt)
++      Converted = Value.zext(DstTy->getBitWidth());
++    else if (CI.getOpcode() == Instruction::Trunc)
++      Converted = Value.trunc(DstTy->getBitWidth());
++    else
++      return std::nullopt;
++
++    if (Converted.getBitWidth() > 64)
++      return std::nullopt;
++    return Converted.getSExtValue();
++  };
++
++  auto Lower = convertSigned(*Input.Lower);
++  auto Upper = convertSigned(*Input.Upper);
++  if (!Lower.has_value() || !Upper.has_value())
++    return Interval::top();
++
++  Bound MinV = std::min(*Lower, *Upper);
++  Bound MaxV = std::max(*Lower, *Upper);
++  return Interval{MinV, MaxV};
++}
++
++static Box joinBoxes(const Box &A, const Box &B) { return Box::unite(A, B); }
++
++static std::optional<Interval> intersectIntervals(const Interval &A,
++                                                  const Interval &B) {
++  std::optional<Bound> Lower =
++      Box::compareLower(A.Lower, B.Lower) >= 0 ? A.Lower : B.Lower;
++  std::optional<Bound> Upper =
++      Box::compareUpper(A.Upper, B.Upper) <= 0 ? A.Upper : B.Upper;
++
++  if (Lower.has_value() && Upper.has_value() && *Lower > *Upper)
++    return std::nullopt;
++  return Interval{Lower, Upper};
++}
++
++static std::optional<Box> intersectBoxes(const Box &A, const Box &B) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
++  for (const Interval &IA : A.Intervals) {
++    for (const Interval &IB : B.Intervals) {
++      std::optional<Interval> Intersected = intersectIntervals(IA, IB);
++      if (Intersected.has_value())
++        ResultIntervals.push_back(*Intersected);
++    }
++  }
++
++  if (ResultIntervals.empty())
++    return std::nullopt;
++
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static Box widenBox(const Box &OldB, const Box &NewB) {
++  Interval Widened = widenInterval(OldB.hull(), NewB.hull());
++  return Box::fromInterval(Widened);
++}
++
++static Box narrowBox(const Box &OldB, const Box &NewB) {
++  Interval Narrowed = narrowInterval(OldB.hull(), NewB.hull());
++  return Box::fromInterval(Narrowed);
++}
++
++static Box addBoxes(const Box &A, const Box &B) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
++  for (const Interval &IA : A.Intervals) {
++    for (const Interval &IB : B.Intervals) {
++      Interval R = addIntervals(IA, IB);
++      if (R.isTop())
++        return Box::top();
++      ResultIntervals.push_back(R);
++    }
++  }
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static Box subBoxes(const Box &A, const Box &B) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
++  for (const Interval &IA : A.Intervals) {
++    for (const Interval &IB : B.Intervals) {
++      Interval R = subIntervals(IA, IB);
++      if (R.isTop())
++        return Box::top();
++      ResultIntervals.push_back(R);
++    }
++  }
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static Box mulBoxes(const Box &A, const Box &B) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
++  for (const Interval &IA : A.Intervals) {
++    for (const Interval &IB : B.Intervals) {
++      Interval R = mulIntervals(IA, IB);
++      if (R.isTop())
++        return Box::top();
++      ResultIntervals.push_back(R);
++    }
++  }
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static std::optional<Bound> safeDiv(Bound A, Bound B) {
++  if (B == 0)
++    return std::nullopt;
++  if (A == std::numeric_limits<Bound>::min() && B == -1)
++    return std::nullopt;
++  return A / B;
++}
++
++static Interval divIntervals(const Interval &A, const Interval &B) {
++  bool ContainsZero = true;
++  if (B.Lower.has_value() && B.Upper.has_value()) {
++    ContainsZero = (*B.Lower <= 0 && *B.Upper >= 0);
++  } else if (B.Lower.has_value()) {
++    ContainsZero = (*B.Lower <= 0);
++  } else if (B.Upper.has_value()) {
++    ContainsZero = (*B.Upper >= 0);
++  }
++
++  if (ContainsZero)
++    return Interval::top();
++
++  if (A.Lower.has_value() && A.Upper.has_value() && B.Lower.has_value() &&
++      B.Upper.has_value()) {
++    std::optional<Bound> C1 = safeDiv(*A.Lower, *B.Lower);
++    std::optional<Bound> C2 = safeDiv(*A.Lower, *B.Upper);
++    std::optional<Bound> C3 = safeDiv(*A.Upper, *B.Lower);
++    std::optional<Bound> C4 = safeDiv(*A.Upper, *B.Upper);
++
++    if (C1.has_value() && C2.has_value() && C3.has_value() && C4.has_value()) {
++      Bound MinV = std::min({*C1, *C2, *C3, *C4});
++      Bound MaxV = std::max({*C1, *C2, *C3, *C4});
++      return Interval{MinV, MaxV};
++    }
++  }
++
++  return Interval::top();
++}
++
++static Box divBoxes(const Box &A, const Box &B) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(A.Intervals.size() * B.Intervals.size());
++  for (const Interval &IA : A.Intervals) {
++    for (const Interval &IB : B.Intervals) {
++      Interval R = divIntervals(IA, IB);
++      if (R.isTop())
++        return Box::top();
++      ResultIntervals.push_back(R);
++    }
++  }
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static Box castBox(const CastInst &CI, const Box &Input) {
++  std::vector<Interval> ResultIntervals;
++  ResultIntervals.reserve(Input.Intervals.size());
++  for (const Interval &I : Input.Intervals) {
++    Interval R = castInterval(CI, I);
++    if (R.isTop())
++      return Box::top();
++    ResultIntervals.push_back(R);
++  }
++  Box Result{std::move(ResultIntervals)};
++  Result.normalize();
++  return Result;
++}
++
++static const Value *getMemorySlot(const Value *Ptr) {
++  return Ptr ? Ptr->stripPointerCasts() : nullptr;
++}
++
++static bool statesEqual(const BlockState &A, const BlockState &B) {
++  if (A.size() != B.size())
++    return false;
++
++  for (const auto &KV : A) {
++    auto It = B.find(KV.first);
++    if (It == B.end() || It->second != KV.second)
++      return false;
++  }
++
++  return true;
++}
++
++static std::optional<Box> getConstraintForPredicate(CmpInst::Predicate Pred,
++                                                    Bound C) {
++  switch (Pred) {
++  case CmpInst::ICMP_SLT: {
++    auto Upper = safeSub(C, 1);
++    if (!Upper.has_value())
++      return std::nullopt;
++    return Box::fromInterval(Interval{std::nullopt, *Upper});
++  }
++  case CmpInst::ICMP_SLE:
++    return Box::fromInterval(Interval{std::nullopt, C});
++  case CmpInst::ICMP_SGT: {
++    auto Lower = safeAdd(C, 1);
++    if (!Lower.has_value())
++      return std::nullopt;
++    return Box::fromInterval(Interval{*Lower, std::nullopt});
++  }
++  case CmpInst::ICMP_SGE:
++    return Box::fromInterval(Interval{C, std::nullopt});
++  case CmpInst::ICMP_EQ:
++    return Box::constant(C);
++  case CmpInst::ICMP_NE: {
++    std::vector<Interval> Intervals;
++    if (auto Upper = safeSub(C, 1); Upper.has_value())
++      Intervals.push_back(Interval{std::nullopt, *Upper});
++    if (auto Lower = safeAdd(C, 1); Lower.has_value())
++      Intervals.push_back(Interval{*Lower, std::nullopt});
++    if (Intervals.empty())
++      return std::nullopt;
++    Box Result{std::move(Intervals)};
++    Result.normalize();
++    return Result;
++  }
++  default:
++    return std::nullopt;
++  }
++}
++
++static std::optional<BlockState> refinePredecessorForEdge(const BasicBlock *Pred,
++                                                          const BasicBlock *Succ,
++                                                          const BlockState &PredOut) {
++  BlockState Refined = PredOut;
++
++  const auto *BI = dyn_cast<BranchInst>(Pred->getTerminator());
++  if (!BI || !BI->isConditional())
++    return Refined;
++
++  unsigned SuccIndex = BI->getSuccessor(0) == Succ ? 0 : BI->getSuccessor(1) == Succ ? 1 : 2;
++  if (SuccIndex >= 2)
++    return Refined;
++
++  const auto *Cmp = dyn_cast<ICmpInst>(BI->getCondition());
++  if (!Cmp)
++    return Refined;
++
++  const Value *Var = Cmp->getOperand(0);
++  const Value *ConstV = Cmp->getOperand(1);
++  CmpInst::Predicate PredKind = Cmp->getPredicate();
++
++  Bound C = 0;
++  if (!tryGetInt64Constant(ConstV, C)) {
++    Bound LeftC = 0;
++    if (!tryGetInt64Constant(Var, LeftC))
++      return Refined;
++
++    Var = Cmp->getOperand(1);
++    C = LeftC;
++    PredKind = ICmpInst::getSwappedPredicate(PredKind);
++  }
++
++  if (!Var->getType()->isIntegerTy())
++    return Refined;
++
++  if (SuccIndex == 1)
++    PredKind = Cmp->getInversePredicate(PredKind);
++
++  std::optional<Box> Constraint = getConstraintForPredicate(PredKind, C);
++  if (!Constraint.has_value())
++    return Refined;
++
++  Box CurrentValue = getValueInterval(Var, PredOut);
++  std::optional<Box> Intersected = intersectBoxes(CurrentValue, *Constraint);
++  if (!Intersected.has_value()) {
++    LLVM_DEBUG(dbgs() << "[interval] infeasible edge " << Pred->getName() << " -> "
++                      << Succ->getName() << " for "
++                      << Var->getNameOrAsOperand() << " under predicate "
++                      << CmpInst::getPredicateName(PredKind) << " " << C << "\n");
++    return std::nullopt;
++  }
++
++  if (*Intersected != CurrentValue) {
++    LLVM_DEBUG(dbgs() << "[interval] edge refine " << Pred->getName() << " -> "
++                      << Succ->getName() << ": "
++                      << Var->getNameOrAsOperand() << " " << CurrentValue.str()
++                      << " => " << Intersected->str() << "\n");
++  }
++
++  Refined[Var] = *Intersected;
++  return Refined;
++}
++
++static std::pair<BlockState, bool> mergePredecessorOut(
++    const BasicBlock *BB, const StateMap &Out, const BlockState &EntrySeed,
++    bool IsEntry, const DenseSet<const BasicBlock *> &ReachableBlocks) {
++  
++  BlockState In;
++  bool IsReachable = false;
++  bool HasAnyPredState = false;
++
++  for (const BasicBlock *Pred : predecessors(BB)) {
++    // If the predecessor itself is dead, it cannot send data.
++    if (!ReachableBlocks.contains(Pred)) continue;
++
++    auto PredOutIt = Out.find(Pred);
++    if (PredOutIt == Out.end()) continue;
++
++    std::optional<BlockState> RefinedPredState =
++        refinePredecessorForEdge(Pred, BB, PredOutIt->second);
++    
++    // If the branch constraint is infeasible, the edge is dead.
++    if (!RefinedPredState.has_value()) continue;
++
++    IsReachable = true;
++    const BlockState &PredOut = *RefinedPredState;
++    if (!HasAnyPredState) {
++      In = PredOut;
++      HasAnyPredState = true;
++      continue;
++    }
++
++    for (const auto &KV : PredOut) {
++      auto It = In.find(KV.first);
++      if (It == In.end())
++        In[KV.first] = KV.second;
++      else
++        It->second = joinBoxes(It->second, KV.second);
++    }
++  }
++
++  if (IsEntry) {
++    IsReachable = true;
++    if (!HasAnyPredState) return {EntrySeed, true};
++
++    for (const auto &KV : EntrySeed) {
++      auto It = In.find(KV.first);
++      if (It == In.end())
++        In[KV.first] = KV.second;
++      else
++        It->second = joinBoxes(It->second, KV.second);
++    }
++  }
++
++  return {In, IsReachable};
++}
++
++static BlockState widenState(const BlockState &OldState, const BlockState &NewState,
++                             const BasicBlock *BB) {
++  BlockState Result = OldState;
++
++  for (const auto &KV : NewState) {
++    auto It = Result.find(KV.first);
++    if (It == Result.end()) {
++      Result[KV.first] = KV.second;
++      continue;
++    }
++
++    Box Widened = widenBox(It->second, KV.second);
++    if (Widened != It->second) {
++      LLVM_DEBUG(dbgs() << "[interval] widen in block " << BB->getName() << ": "
++                        << KV.first->getNameOrAsOperand() << " "
++                        << It->second.str() << " -> " << Widened.str() << "\n");
++    }
++    It->second = Widened;
++  }
++
++  return Result;
++}
++
++static BlockState narrowState(const BlockState &OldState, const BlockState &NewState,
++                              const BasicBlock *BB) {
++  BlockState Result = OldState;
++
++  for (const auto &KV : NewState) {
++    auto It = Result.find(KV.first);
++    if (It == Result.end()) {
++      Result[KV.first] = KV.second;
++      continue;
++    }
++
++    Box Narrowed = narrowBox(It->second, KV.second);
++    if (Narrowed != It->second) {
++      LLVM_DEBUG(dbgs() << "[interval] narrow in block " << BB->getName() << ": "
++                        << KV.first->getNameOrAsOperand() << " "
++                        << It->second.str() << " -> " << Narrowed.str() << "\n");
++    }
++    It->second = Narrowed;
++  }
++
++  return Result;
++}
++
++static BlockState transferBlock(const BasicBlock &BB, const BlockState &In,
++                                const StateMap &Out) {
++  BlockState Current = In;
++
++  for (const Instruction &I : BB) {
++    if (auto *AI = dyn_cast<AllocaInst>(&I)) {
++      Current[AI] = Box::top();
++      continue;
++    }
++
++    if (auto *SI = dyn_cast<StoreInst>(&I)) {
++      const Value *Slot = getMemorySlot(SI->getPointerOperand());
++      if (Slot)
++        Current[Slot] = getValueInterval(SI->getValueOperand(), Current);
++      continue;
++    }
++
++    if (auto *LI = dyn_cast<LoadInst>(&I)) {
++      const Value *Slot = getMemorySlot(LI->getPointerOperand());
++      if (Slot)
++        Current[&I] = getValueInterval(Slot, Current);
++      else
++        Current[&I] = Box::top();
++      continue;
++    }
++
++    if (auto *Call = dyn_cast<CallBase>(&I)) {
++      for (Value *Arg : Call->args()) {
++        if (!Arg->getType()->isPointerTy())
++          continue;
++
++        if (const Value *Slot = getMemorySlot(Arg))
++          Current[Slot] = Box::top();
++      }
++
++      if (Call->getType()->isIntegerTy())
++        Current[&I] = Box::top();
++      continue;
++    }
++
++    if (!I.getType()->isIntegerTy())
++      continue;
++
++    Box Result = Box::top();
++
++    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
++      Box LHS = getValueInterval(BO->getOperand(0), Current);
++      Box RHS = getValueInterval(BO->getOperand(1), Current);
++      switch (BO->getOpcode()) {
++      case Instruction::Add:
++        Result = addBoxes(LHS, RHS);
++        break;
++      case Instruction::Sub:
++        Result = subBoxes(LHS, RHS);
++        break;
++      case Instruction::Mul:
++        Result = mulBoxes(LHS, RHS);
++        break;
++      case Instruction::SDiv:
++        Result = divBoxes(LHS, RHS);
++        break;
++      default:
++        Result = Box::top();
++        break;
++      }
++    } else if (auto *CI = dyn_cast<CastInst>(&I)) {
++      Box Input = getValueInterval(CI->getOperand(0), Current);
++      Result = castBox(*CI, Input);
++    } else if (auto *Phi = dyn_cast<PHINode>(&I)) {
++      Box PhiResult;
++      bool First = true;
++      for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
++        const BasicBlock *Pred = Phi->getIncomingBlock(i);
++        const Value *IncVal = Phi->getIncomingValue(i);
++
++        auto PredOutIt = Out.find(Pred);
++        if (PredOutIt == Out.end()) continue;
++
++        std::optional<BlockState> RefinedState = refinePredecessorForEdge(Pred, &BB, PredOutIt->second);
++        if (!RefinedState) continue;
++
++        Box IncBox = getValueInterval(IncVal, *RefinedState);
++        if (First) {
++          PhiResult = IncBox;
++          First = false;
++        } else {
++          PhiResult = joinBoxes(PhiResult, IncBox);
++        }
++      }
++      
++      // FIX: If no predecessors have been visited yet, skip assigning TOP.
++      // Leave it out of the Current map so it acts as an implicit BOTTOM.
++      if (First) {
++        continue;
++      } else {
++        Result = PhiResult;
++      }
++    } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
++      Box TrueValue = getValueInterval(SI->getTrueValue(), Current);
++      Box FalseValue = getValueInterval(SI->getFalseValue(), Current);
++      Result = joinBoxes(TrueValue, FalseValue);
++    } else {
++      Result = Box::top();
++    }
++
++    Current[&I] = Result;
++  }
++
++  return Current;
++}
++
++static std::vector<const BasicBlock *> computeRPO(const Function &F) {
++  std::vector<const BasicBlock *> Order;
++  if (F.empty())
++    return Order;
++
++  ReversePostOrderTraversal<const Function *> RPO(&F);
++  for (const BasicBlock *BB : RPO)
++    Order.push_back(BB);
++
++  for (const BasicBlock &BB : F) {
++    const BasicBlock *BBPtr = &BB;
++    if (std::find(Order.begin(), Order.end(), BBPtr) == Order.end())
++      Order.push_back(BBPtr);
++  }
++
++  return Order;
++}
++
++static std::string getStableValueName(const Value *V) {
++  if (V->hasName())
++    return ("0_" + V->getName()).str();
++
++  std::string S;
++  raw_string_ostream OS(S);
++  V->printAsOperand(OS, false);
++  return "1_" + OS.str();
++}
++
++static void printOutState(const Function &F, const StateMap &In,
++                          const StateMap &Out) {
++  for (const BasicBlock &BB : F) {
++    const BasicBlock *BBPtr = &BB;
++
++    std::vector<std::pair<std::string, const Value *>> Keys;
++    auto InIt = In.find(BBPtr);
++    auto OutIt = Out.find(BBPtr);
++    if (InIt != In.end()) {
++      for (const auto &KV : InIt->second)
++        Keys.push_back({getStableValueName(KV.first), KV.first});
++    }
++    if (OutIt != Out.end()) {
++      for (const auto &KV : OutIt->second)
++        Keys.push_back({getStableValueName(KV.first), KV.first});
++    }
++
++    if (Keys.empty()) {
++      outs() << '\n';
++      continue;
++    }
++
++    llvm::sort(Keys, [](const auto &A, const auto &B) { return A.first < B.first; });
++    Keys.erase(std::unique(Keys.begin(), Keys.end(),
++                           [](const auto &A, const auto &B) {
++                             return A.first == B.first;
++                           }),
++               Keys.end());
++
++    std::vector<std::tuple<std::string, std::string, std::string>> Rows;
++    Rows.reserve(Keys.size());
++
++    size_t ValueWidth = 8;
++    size_t InWidth = 5;
++    size_t OutWidth = 6;
++
++    auto lookupBoxString = [&](const BlockState *State,
++                               const Value *V) -> std::string {
++      if (!State)
++        return "-";
++      auto It = State->find(V);
++      if (It == State->end())
++        return "-";
++      return It->second.str();
++    };
++
++    for (const auto &Entry : Keys) {
++      const Value *V = Entry.second;
++      std::string VS;
++      raw_string_ostream VOS(VS);
++      V->printAsOperand(VOS, false);
++
++      std::string InText = lookupBoxString(InIt != In.end() ? &InIt->second : nullptr, V);
++      std::string OutText = lookupBoxString(OutIt != Out.end() ? &OutIt->second : nullptr, V);
++
++      Rows.emplace_back(VOS.str(), InText, OutText);
++      ValueWidth = std::max(ValueWidth, std::get<0>(Rows.back()).size());
++      InWidth = std::max(InWidth, std::get<1>(Rows.back()).size());
++      OutWidth = std::max(OutWidth, std::get<2>(Rows.back()).size());
++    }
++
++    std::string Title;
++    raw_string_ostream TS(Title);
++    TS << " Basic Block: ";
++    if (BB.hasName())
++      TS << '%' << BB.getName();
++    else
++      TS << "<unnamed>";
++    TS << ' ';
++    TS.flush();
++
++    size_t TableWidth = ValueWidth + InWidth + OutWidth + 10;
++    size_t BannerWidth = std::max<size_t>(Title.size() + 4, TableWidth);
++
++    auto printLine = [&](char Fill) {
++      outs() << '+';
++      for (size_t I = 0; I < BannerWidth - 2; ++I)
++        outs() << Fill;
++      outs() << "+\n";
++    };
++
++    auto printCellRow = [&](StringRef Left, size_t LeftWidth, StringRef Middle,
++                            size_t MiddleWidth, StringRef Right,
++                            size_t RightWidth) {
++      outs() << "| " << Left;
++      for (size_t I = Left.size(); I < LeftWidth; ++I)
++        outs() << ' ';
++      outs() << " | " << Middle;
++      for (size_t I = Middle.size(); I < MiddleWidth; ++I)
++        outs() << ' ';
++      outs() << " | " << Right;
++      for (size_t I = Right.size(); I < RightWidth; ++I)
++        outs() << ' ';
++      size_t RowWidth = LeftWidth + MiddleWidth + RightWidth + 10;
++      for (size_t I = RowWidth; I < BannerWidth; ++I)
++        outs() << ' ';
++      outs() << " |\n";
++    };
++
++    printLine('-');
++    outs() << "| ";
++    outs() << Title;
++    for (size_t I = Title.size() + 3; I < BannerWidth; ++I)
++      outs() << ' ';
++    outs() << "|\n";
++    printLine('-');
++
++    printCellRow("Variable", ValueWidth, "BoxIn", InWidth, "BoxOut",
++                 OutWidth);
++    outs() << "| ";
++    for (size_t I = 0; I < ValueWidth; ++I)
++      outs() << '-';
++    outs() << " | ";
++    for (size_t I = 0; I < InWidth; ++I)
++      outs() << '-';
++    outs() << " | ";
++    for (size_t I = 0; I < OutWidth; ++I)
++      outs() << '-';
++    for (size_t I = ValueWidth + InWidth + OutWidth + 10; I < BannerWidth; ++I)
++      outs() << ' ';
++    outs() << " |\n";
++
++    for (const auto &Row : Rows)
++      printCellRow(std::get<0>(Row), ValueWidth, std::get<1>(Row), InWidth,
++                   std::get<2>(Row), OutWidth);
++
++    outs() << '\n';
++  }
++}
++
++} // namespace
++
++PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
++                                                  FunctionAnalysisManager &AM) {
++  if (!EnableIntervalAnalysis) return PreservedAnalyses::all();
++
++  LoopInfo &LI = AM.getResult<LoopAnalysis>(F);
++  StateMap IN;
++  StateMap OUT;
++  BlockState EntrySeed;
++
++  for (const Argument &Arg : F.args()) {
++    if (Arg.getType()->isIntegerTy()) EntrySeed[&Arg] = Box::top();
++  }
++
++  std::vector<const BasicBlock *> RPO = computeRPO(F);
++  DenseSet<const BasicBlock *> ReachableBlocks; // <--- ADDED
++
++  // ==========================================
++  // PHASE 1: Fixpoint Evaluation with Widening
++  // ==========================================
++  std::deque<const BasicBlock *> Worklist;
++  DenseSet<const BasicBlock *> InWorklist;
++  DenseMap<const BasicBlock *, unsigned> VisitCount;
++
++  for (const BasicBlock *BB : RPO) {
++    Worklist.push_back(BB);
++    InWorklist.insert(BB);
++  }
++
++  const BasicBlock *EntryBB = F.empty() ? nullptr : &F.getEntryBlock();
++  unsigned MaxPhase1Iters = 10000;
++  unsigned Iters = 0;
++
++  while (!Worklist.empty() && Iters++ < MaxPhase1Iters) {
++    const BasicBlock *BB = Worklist.front();
++    Worklist.pop_front();
++    InWorklist.erase(BB);
++    unsigned ThisVisit = ++VisitCount[BB];
++
++    // Get IN state and reachability
++    auto [NewIn, IsReachable] = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB, ReachableBlocks);
++    IN[BB] = NewIn;
++
++    BlockState NewOut;
++    
++    // Only evaluate instructions if the block is actually reachable!
++    if (IsReachable) {
++      ReachableBlocks.insert(BB);
++      NewOut = transferBlock(*BB, NewIn, OUT);
++
++      if (LI.isLoopHeader(BB) && ThisVisit > 2) {
++        auto OldOutIt = OUT.find(BB);
++        if (OldOutIt != OUT.end()) {
++          NewOut = widenState(OldOutIt->second, NewOut, BB);
++        }
++      }
++    } else {
++      ReachableBlocks.erase(BB);
++      // NewOut remains mathematically empty (BOT)
++    }
++
++    auto OldOutIt = OUT.find(BB);
++    if (OldOutIt == OUT.end() || !statesEqual(NewOut, OldOutIt->second)) {
++      OUT[BB] = std::move(NewOut);
++      for (const BasicBlock *Succ : successors(BB)) {
++        if (InWorklist.insert(Succ).second) Worklist.push_back(Succ);
++      }
++    }
++  }
++
++  // ==========================================
++  // PHASE 2: Bounded Narrowing Pass
++  // ==========================================
++  for (const BasicBlock *BB : RPO) {
++    Worklist.push_back(BB);
++    InWorklist.insert(BB);
++  }
++
++  constexpr unsigned MaxNarrowingSweeps = 5;
++  for (unsigned Sweep = 0; Sweep < MaxNarrowingSweeps; ++Sweep) {
++    bool AnyChanged = false;
++    for (const BasicBlock *BB : RPO) {
++
++      auto [NewIn, IsReachable] = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB, ReachableBlocks);
++
++      bool InChanged = false;
++      auto OldInIt = IN.find(BB);
++      if (OldInIt == IN.end() || !statesEqual(NewIn, OldInIt->second)) {
++        InChanged = true;
++        IN[BB] = NewIn;
++      }
++
++      BlockState NewOut;
++      if (IsReachable) {
++        ReachableBlocks.insert(BB);
++        NewOut = transferBlock(*BB, NewIn, OUT);
++
++        if (LI.isLoopHeader(BB)) {
++          auto OldOutIt = OUT.find(BB);
++          if (OldOutIt != OUT.end()) {
++            NewOut = narrowState(OldOutIt->second, NewOut, BB);
++          }
++        }
++      } else {
++        ReachableBlocks.erase(BB);
++      }
++
++      auto OldOutIt = OUT.find(BB);
++      if (OldOutIt == OUT.end() || !statesEqual(NewOut, OldOutIt->second)) {
++        OUT[BB] = std::move(NewOut);
++        AnyChanged = true;
++      }
++    }
++    if (!AnyChanged) break;
++  }
++
++  printOutState(F, IN, OUT);
++  return PreservedAnalyses::all();
++}
+\ No newline at end of file
+diff --git a/llvm/lib/Passes/PassBuilder.cpp b/llvm/lib/Passes/PassBuilder.cpp
+index 8bb78c8c7df6..7b3f84f14ea7 100644
+--- a/llvm/lib/Passes/PassBuilder.cpp
++++ b/llvm/lib/Passes/PassBuilder.cpp
+@@ -28,6 +28,7 @@
+ #include "llvm/Analysis/CallPrinter.h"
+ #include "llvm/Analysis/CostModel.h"
+ #include "llvm/Analysis/CtxProfAnalysis.h"
++#include "llvm/Analysis/CustomIntervalAnalysis.h"
+ #include "llvm/Analysis/CycleAnalysis.h"
+ #include "llvm/Analysis/DDG.h"
+ #include "llvm/Analysis/DDGPrinter.h"
+diff --git a/llvm/lib/Passes/PassRegistry.def b/llvm/lib/Passes/PassRegistry.def
+index 2cfb5b259260..320581db83c6 100644
+--- a/llvm/lib/Passes/PassRegistry.def
++++ b/llvm/lib/Passes/PassRegistry.def
+@@ -456,6 +456,7 @@ FUNCTION_PASS("instnamer", InstructionNamerPass())
+ FUNCTION_PASS("instsimplify", InstSimplifyPass())
+ FUNCTION_PASS("interleaved-access", InterleavedAccessPass(*TM))
+ FUNCTION_PASS("interleaved-load-combine", InterleavedLoadCombinePass(*TM))
++FUNCTION_PASS("interval-analysis", CustomIntervalAnalysisPass())
+ FUNCTION_PASS("invalidate<all>", InvalidateAllAnalysesPass())
+ FUNCTION_PASS("irce", IRCEPass())
+ FUNCTION_PASS("jump-threading", JumpThreadingPass())
+diff --git a/llvm/test/Analysis/CustomIntervalAnalysis/edge_refinement_eq_ne.ll b/llvm/test/Analysis/CustomIntervalAnalysis/edge_refinement_eq_ne.ll
+new file mode 100644
+index 000000000000..af3bfac4caed
+--- /dev/null
++++ b/llvm/test/Analysis/CustomIntervalAnalysis/edge_refinement_eq_ne.ll
+@@ -0,0 +1,24 @@
++; RUN: opt -passes=interval-analysis %s | FileCheck %s
++
++define i32 @eq_ne_refine(i32 %x) {
++entry:
++  %cmp = icmp eq i32 %x, 3
++  br i1 %cmp, label %then, label %else
++
++then:
++  %t = add nsw i32 %x, 1
++  br label %exit
++
++else:
++  %e = sub nsw i32 %x, 1
++  br label %exit
++
++exit:
++  %r = phi i32 [ %t, %then ], [ %e, %else ]
++  ret i32 %r
++}
++
++; CHECK: Basic Block: %then
++; CHECK: %x       | {3}         | {3}
++; CHECK: Basic Block: %else
++; CHECK: %x       | [-INF, 2] U [4, INF] | [-INF, 2] U [4, INF]
+diff --git a/llvm/test/Analysis/CustomIntervalAnalysis/loop_narrowing.ll b/llvm/test/Analysis/CustomIntervalAnalysis/loop_narrowing.ll
+new file mode 100644
+index 000000000000..30913355f9c7
+--- /dev/null
++++ b/llvm/test/Analysis/CustomIntervalAnalysis/loop_narrowing.ll
+@@ -0,0 +1,31 @@
++; RUN: opt -passes=interval-analysis %s | FileCheck %s
++
++define i32 @loop_bounds() {
++entry:
++  br label %for.cond
++
++for.cond:
++  %a.0 = phi i32 [ 10, %entry ], [ %add, %for.inc ]
++  %i.0 = phi i32 [ 0, %entry ], [ %inc, %for.inc ]
++  %cmp = icmp slt i32 %i.0, 5
++  br i1 %cmp, label %for.body, label %for.end
++
++for.body:
++  %add = add nsw i32 %a.0, 1
++  br label %for.inc
++
++for.inc:
++  %inc = add nsw i32 %i.0, 1
++  br label %for.cond
++
++for.end:
++  %mul = mul nsw i32 %a.0, 2
++  ret i32 %mul
++}
++
++; CHECK: Basic Block: %for.cond
++; CHECK: %i.0     | [0, 5]      | [0, 5]
++; CHECK: Basic Block: %for.body
++; CHECK: %i.0     | [0, 4]      | [0, 4]
++; CHECK: Basic Block: %for.end
++; CHECK: %i.0     | [5, INF]    | [5, INF]
+diff --git a/run_batch_interval.sh b/run_batch_interval.sh
+new file mode 100755
+index 000000000000..89eefb6d6c20
+--- /dev/null
++++ b/run_batch_interval.sh
+@@ -0,0 +1,197 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++  cat <<'EOF'
++Usage: ./run_batch_interval.sh [-d <input-dir>] [-o <results-dir>] [-b <build-dir>] [-k] [-r] [-g]
++                             [-N|-A] [-m|-M] [-s|-S] [-f|-F] [-l|-L]
++
++Options:
++  -d <dir>    Directory containing test files recursively (default: ./tests)
++  -o <dir>    Output directory (default: ./test-result)
++  -b <dir>    Build directory (default: ./build)
++  -k          Keep intermediate .ll files for C/C++ inputs
++  -r          Force rebuild opt/clang with ninja before running
++  -g          Enable LLVM debug output for interval analysis
++
++Pre-Pass Running Flags:
++  -N          Disable all pre-passes (mem2reg, sroa, simplifycfg, loop-simplify)
++  -A          Enable all pre-passes (sroa, mem2reg, simplifycfg, loop-simplify)
++  -m          Enable mem2reg pre-pass (default: enabled)
++  -M          Disable mem2reg pre-pass
++  -s          Enable sroa pre-pass (default: disabled)
++  -S          Disable sroa pre-pass
++  -f          Enable simplifycfg pre-pass (default: enabled)
++  -F          Disable simplifycfg pre-pass
++  -l          Enable loop-simplify pre-pass (default: disabled)
++  -L          Disable loop-simplify pre-pass
++  -h          Show this help message
++EOF
++}
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++BUILD_DIR="$ROOT_DIR/build"
++INPUT_DIR="$ROOT_DIR/tests"
++OUTPUT_DIR="$ROOT_DIR/test-result"
++CONFIG_FILE="$ROOT_DIR/interval-analysis.config.sh"
++LOCAL_CONFIG_FILE="$ROOT_DIR/interval-analysis.config.local.sh"
++KEEP_IR=0
++FORCE_REBUILD=0
++DEBUG_MODE=0
++
++if [[ "${1:-}" == "--help" ]]; then
++  usage
++  exit 0
++fi
++
++if [[ -f "$CONFIG_FILE" ]]; then
++  # shellcheck disable=SC1090
++  source "$CONFIG_FILE"
++fi
++
++if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
++  # shellcheck disable=SC1090
++  source "$LOCAL_CONFIG_FILE"
++fi
++
++PRE_MEM2REG="${INTERVAL_DEFAULT_PRE_MEM2REG:-1}"
++PRE_SROA="${INTERVAL_DEFAULT_PRE_SROA:-0}"
++PRE_SIMPLIFYCFG="${INTERVAL_DEFAULT_PRE_SIMPLIFYCFG:-1}"
++PRE_LOOP_SIMPLIFY="${INTERVAL_DEFAULT_PRE_LOOP_SIMPLIFY:-0}"
++
++declare -a PREPASS_ORDER=()
++if declare -p INTERVAL_PREPASS_ORDER >/dev/null 2>&1; then
++  PREPASS_ORDER=("${INTERVAL_PREPASS_ORDER[@]}")
++else
++  PREPASS_ORDER=("sroa" "mem2reg" "simplifycfg" "loop-simplify")
++fi
++
++join_by() {
++  local separator="$1"
++  shift
++  local IFS="$separator"
++  echo "$*"
++}
++
++while getopts ":d:o:b:krgNAmMsSfFlLh" opt; do
++  case "$opt" in
++    d) INPUT_DIR="$OPTARG" ;;
++    o) OUTPUT_DIR="$OPTARG" ;;
++    b) BUILD_DIR="$OPTARG" ;;
++    k) KEEP_IR=1 ;;
++    r) FORCE_REBUILD=1 ;;
++    g) DEBUG_MODE=1 ;;
++    N)
++      PRE_MEM2REG=0
++      PRE_SROA=0
++      PRE_SIMPLIFYCFG=0
++      PRE_LOOP_SIMPLIFY=0
++      ;;
++    A)
++      PRE_MEM2REG=1
++      PRE_SROA=1
++      PRE_SIMPLIFYCFG=1
++      PRE_LOOP_SIMPLIFY=1
++      ;;
++    m) PRE_MEM2REG=1 ;;
++    M) PRE_MEM2REG=0 ;;
++    s) PRE_SROA=1 ;;
++    S) PRE_SROA=0 ;;
++    f) PRE_SIMPLIFYCFG=1 ;;
++    F) PRE_SIMPLIFYCFG=0 ;;
++    l) PRE_LOOP_SIMPLIFY=1 ;;
++    L) PRE_LOOP_SIMPLIFY=0 ;;
++    h)
++      usage
++      exit 0
++      ;;
++    :) echo "error: option -$OPTARG requires an argument"; usage; exit 1 ;;
++    \?) echo "error: invalid option -$OPTARG"; usage; exit 1 ;;
++  esac
++done
++
++if [[ ! -d "$INPUT_DIR" ]]; then
++  echo "error: input directory not found: $INPUT_DIR"
++  exit 1
++fi
++
++mkdir -p "$OUTPUT_DIR"
++
++mapfile -t INPUTS < <(find "$INPUT_DIR" -type f \( -name '*.ll' -o -name '*.c' -o -name '*.cpp' -o -name '*.cc' -o -name '*.cxx' \) | sort)
++
++if [[ "${#INPUTS[@]}" -eq 0 ]]; then
++  echo "error: no supported input files found in $INPUT_DIR"
++  exit 1
++fi
++
++SUCCESS=0
++FAIL=0
++
++echo "Pre-Pass Running (configured order: $(join_by ' -> ' "${PREPASS_ORDER[@]}")):"
++echo "  sroa: $([[ "$PRE_SROA" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  mem2reg: $([[ "$PRE_MEM2REG" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  simplifycfg: $([[ "$PRE_SIMPLIFYCFG" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  config: $(basename "$CONFIG_FILE")"
++echo "  debug: $([[ "$DEBUG_MODE" -eq 1 ]] && echo enabled || echo disabled)"
++if [[ "$FORCE_REBUILD" -eq 1 ]]; then
++  echo "Build mode: force rebuild enabled (-r)"
++else
++  echo "Build mode: incremental ninja check (rebuilds if sources changed)"
++fi
++echo "Per-test execution logs: <artifact-dir>/run.log"
++
++for FILE in "${INPUTS[@]}"; do
++  REL_PATH="${FILE#$INPUT_DIR/}"
++  REL_NO_EXT="${REL_PATH%.*}"
++  ARTIFACT_DIR="$OUTPUT_DIR/${REL_NO_EXT}"
++  RUN_LOG="$ARTIFACT_DIR/run.log"
++  mkdir -p "$ARTIFACT_DIR"
++
++  declare -a SINGLE_ARGS
++  SINGLE_ARGS=(-i "$FILE" -a "$ARTIFACT_DIR" -b "$BUILD_DIR")
++  if [[ "$KEEP_IR" -eq 1 ]]; then
++    SINGLE_ARGS+=("-k")
++  fi
++  if [[ "$FORCE_REBUILD" -eq 1 ]]; then
++    SINGLE_ARGS+=("-r")
++  fi
++  if [[ "$DEBUG_MODE" -eq 1 ]]; then
++    SINGLE_ARGS+=("-g")
++  fi
++  if [[ "$PRE_MEM2REG" -eq 0 ]]; then
++    SINGLE_ARGS+=("-M")
++  fi
++  if [[ "$PRE_SROA" -eq 1 ]]; then
++    SINGLE_ARGS+=("-s")
++  fi
++  if [[ "$PRE_SROA" -eq 0 ]]; then
++    SINGLE_ARGS+=("-S")
++  fi
++  if [[ "$PRE_SIMPLIFYCFG" -eq 1 ]]; then
++    SINGLE_ARGS+=("-f")
++  fi
++  if [[ "$PRE_SIMPLIFYCFG" -eq 0 ]]; then
++    SINGLE_ARGS+=("-F")
++  fi
++  if [[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]]; then
++    SINGLE_ARGS+=("-l")
++  fi
++  if [[ "$PRE_LOOP_SIMPLIFY" -eq 0 ]]; then
++    SINGLE_ARGS+=("-L")
++  fi
++
++  if "$ROOT_DIR/run_single_interval.sh" "${SINGLE_ARGS[@]}" >"$RUN_LOG" 2>&1; then
++    echo "[ok] $FILE"
++    SUCCESS=$((SUCCESS + 1))
++  else
++    echo "[fail] $FILE (see $RUN_LOG)"
++    FAIL=$((FAIL + 1))
++  fi
++done
++
++echo "Batch complete: success=$SUCCESS fail=$FAIL output_dir=$OUTPUT_DIR"
++
++if [[ "$FAIL" -ne 0 ]]; then
++  exit 2
++fi
+diff --git a/run_build_check.sh b/run_build_check.sh
+new file mode 100755
+index 000000000000..dad352a63c42
+--- /dev/null
++++ b/run_build_check.sh
+@@ -0,0 +1,52 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++  cat <<'EOF'
++Usage: ./run_build_check.sh [-b <build-dir>] [-j <jobs>] [-h|--help]
++
++Options:
++  -b <dir>    Build directory (default: ./build)
++  -j <jobs>   Parallel build jobs (default: nproc or JOBS env)
++  -h          Show this help message
++  --help      Show this help message
++EOF
++}
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++LLVM_SRC_DIR="$ROOT_DIR/llvm"
++BUILD_DIR="$ROOT_DIR/build"
++JOBS="${JOBS:-$(nproc)}"
++
++if [[ "${1:-}" == "--help" ]]; then
++  usage
++  exit 0
++fi
++
++while getopts ":b:j:h" opt; do
++  case "$opt" in
++    b) BUILD_DIR="$OPTARG" ;;
++    j) JOBS="$OPTARG" ;;
++    h)
++      usage
++      exit 0
++      ;;
++    :) echo "error: option -$OPTARG requires an argument"; usage; exit 1 ;;
++    \?) echo "error: invalid option -$OPTARG"; usage; exit 1 ;;
++  esac
++done
++
++if [[ ! -d "$LLVM_SRC_DIR" ]]; then
++  echo "error: expected LLVM source at $LLVM_SRC_DIR"
++  exit 1
++fi
++
++mkdir -p "$BUILD_DIR"
++
++if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
++  cmake -S "$LLVM_SRC_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
++fi
++
++ninja -C "$BUILD_DIR" -j "$JOBS" opt clang
++
++echo "Build check successful."
+diff --git a/run_single_interval.sh b/run_single_interval.sh
+new file mode 100755
+index 000000000000..709481d7cb93
+--- /dev/null
++++ b/run_single_interval.sh
+@@ -0,0 +1,317 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++  cat <<'EOF'
++Usage: ./run_single_interval.sh -i <input.{ll,c,cpp}> [-o <output-file>] [-b <build-dir>] [-k] [-r] [-g]
++                              [-N|-A] [-m|-M] [-s|-S] [-f|-F] [-l|-L] [-a <artifact-dir>]
++
++Options:
++  -i <file>   Input source (.ll, .c, .cpp)
++  -o <file>   Output file for pass output (default: <input>_interval.out)
++  -b <dir>    Build directory (default: ./build)
++  -k          Keep intermediate .ll when compiling from C/C++
++  -r          Force rebuild opt/clang with ninja before running
++  -g          Enable LLVM debug output for interval analysis
++  -a <dir>    Artifact directory (writes original.ir, after-prepass.ir, result.md)
++
++Pre-Pass Running Flags:
++  -N          Disable all pre-passes (mem2reg, sroa, simplifycfg, loop-simplify)
++  -A          Enable all pre-passes (sroa, mem2reg, simplifycfg, loop-simplify)
++  -m          Enable mem2reg pre-pass (default: enabled)
++  -M          Disable mem2reg pre-pass
++  -s          Enable sroa pre-pass (default: disabled)
++  -S          Disable sroa pre-pass
++  -f          Enable simplifycfg pre-pass (default: enabled)
++  -F          Disable simplifycfg pre-pass
++  -l          Enable loop-simplify pre-pass (default: disabled)
++  -L          Disable loop-simplify pre-pass
++
++Notes:
++  - cmake is used only for first-time build directory configuration
++  - ninja is always run for incremental stale-change detection
++  -h          Show this help message
++EOF
++}
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++BUILD_DIR="$ROOT_DIR/build"
++LLVM_SRC_DIR="$ROOT_DIR/llvm"
++CONFIG_FILE="$ROOT_DIR/interval-analysis.config.sh"
++LOCAL_CONFIG_FILE="$ROOT_DIR/interval-analysis.config.local.sh"
++INPUT_FILE=""
++OUTPUT_FILE=""
++KEEP_IR=0
++FORCE_REBUILD=0
++DEBUG_MODE=0
++ARTIFACT_DIR=""
++
++if [[ "${1:-}" == "--help" ]]; then
++  usage
++  exit 0
++fi
++
++if [[ -f "$CONFIG_FILE" ]]; then
++  # shellcheck disable=SC1090
++  source "$CONFIG_FILE"
++fi
++
++if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
++  # shellcheck disable=SC1090
++  source "$LOCAL_CONFIG_FILE"
++fi
++
++PRE_MEM2REG="${INTERVAL_DEFAULT_PRE_MEM2REG:-1}"
++PRE_SROA="${INTERVAL_DEFAULT_PRE_SROA:-0}"
++PRE_SIMPLIFYCFG="${INTERVAL_DEFAULT_PRE_SIMPLIFYCFG:-1}"
++PRE_LOOP_SIMPLIFY="${INTERVAL_DEFAULT_PRE_LOOP_SIMPLIFY:-0}"
++
++declare -a PREPASS_ORDER=()
++if declare -p INTERVAL_PREPASS_ORDER >/dev/null 2>&1; then
++  PREPASS_ORDER=("${INTERVAL_PREPASS_ORDER[@]}")
++else
++  PREPASS_ORDER=("sroa" "mem2reg" "simplifycfg" "loop-simplify")
++fi
++
++join_by() {
++  local separator="$1"
++  shift
++  local IFS="$separator"
++  echo "$*"
++}
++
++ensure_build() {
++  local jobs="${JOBS:-$(nproc)}"
++
++  if [[ ! -d "$LLVM_SRC_DIR" ]]; then
++    echo "error: expected LLVM source at $LLVM_SRC_DIR"
++    exit 1
++  fi
++
++  mkdir -p "$BUILD_DIR"
++
++  if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
++    echo "Build: configuring build directory at $BUILD_DIR"
++    cmake -S "$LLVM_SRC_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
++  fi
++
++  if [[ "$FORCE_REBUILD" -eq 1 ]]; then
++    echo "Build: force rebuild requested; cleaning opt/clang targets"
++    ninja -C "$BUILD_DIR" -t clean opt clang >/dev/null
++    echo "Build: rebuilding opt/clang with ninja"
++  else
++    echo "Build: checking for stale changes with ninja (incremental)"
++  fi
++
++  ninja -C "$BUILD_DIR" -j "$jobs" opt clang
++}
++
++while getopts ":i:o:b:a:krgNAmMsSfFlLh" opt; do
++  case "$opt" in
++    i) INPUT_FILE="$OPTARG" ;;
++    o) OUTPUT_FILE="$OPTARG" ;;
++    b) BUILD_DIR="$OPTARG" ;;
++    a) ARTIFACT_DIR="$OPTARG" ;;
++    k) KEEP_IR=1 ;;
++    r) FORCE_REBUILD=1 ;;
++    g) DEBUG_MODE=1 ;;
++    N)
++      PRE_MEM2REG=0
++      PRE_SROA=0
++      PRE_SIMPLIFYCFG=0
++      PRE_LOOP_SIMPLIFY=0
++      ;;
++    A)
++      PRE_MEM2REG=1
++      PRE_SROA=1
++      PRE_SIMPLIFYCFG=1
++      PRE_LOOP_SIMPLIFY=1
++      ;;
++    m) PRE_MEM2REG=1 ;;
++    M) PRE_MEM2REG=0 ;;
++    s) PRE_SROA=1 ;;
++    S) PRE_SROA=0 ;;
++    f) PRE_SIMPLIFYCFG=1 ;;
++    F) PRE_SIMPLIFYCFG=0 ;;
++    l) PRE_LOOP_SIMPLIFY=1 ;;
++    L) PRE_LOOP_SIMPLIFY=0 ;;
++    h)
++      usage
++      exit 0
++      ;;
++    :) echo "error: option -$OPTARG requires an argument"; usage; exit 1 ;;
++    \?) echo "error: invalid option -$OPTARG"; usage; exit 1 ;;
++  esac
++done
++
++if [[ -z "$INPUT_FILE" ]]; then
++  echo "error: -i is required"
++  usage
++  exit 1
++fi
++
++if [[ ! -f "$INPUT_FILE" ]]; then
++  echo "error: input file not found: $INPUT_FILE"
++  exit 1
++fi
++
++ensure_build
++
++OPT_BIN="$(readlink -f "$BUILD_DIR/bin/opt" 2>/dev/null || echo "$BUILD_DIR/bin/opt")"
++CLANG_BIN="$(readlink -f "$BUILD_DIR/bin/clang" 2>/dev/null || echo "$BUILD_DIR/bin/clang")"
++declare -a OPT_EXTRA_ARGS=()
++if [[ "$DEBUG_MODE" -eq 1 ]]; then
++  OPT_EXTRA_ARGS+=("-debug" "-debug-only=interval-analysis" "-df-interval=true")
++fi
++
++WORK_IR="$INPUT_FILE"
++TEMP_IR=""
++EXT="${INPUT_FILE##*.}"
++
++if [[ "$EXT" == "c" || "$EXT" == "cpp" || "$EXT" == "cc" || "$EXT" == "cxx" ]]; then
++  TEMP_IR="${INPUT_FILE%.*}.interval.tmp.ll"
++  for ATTEMPT in 1 2 3; do
++    if "$CLANG_BIN" -S -emit-llvm -O0 -Xclang -disable-O0-optnone "$INPUT_FILE" -o "$TEMP_IR"; then
++      break
++    fi
++
++    STATUS=$?
++    if [[ "$STATUS" -eq 126 && "$ATTEMPT" -lt 3 ]]; then
++      echo "warning: clang executable busy, retrying ($ATTEMPT/3)"
++      continue
++    fi
++
++    exit "$STATUS"
++  done
++  WORK_IR="$TEMP_IR"
++fi
++
++if [[ -z "$OUTPUT_FILE" ]]; then
++  BASE_NAME="$(basename "${INPUT_FILE%.*}")"
++  OUTPUT_FILE="$ROOT_DIR/${BASE_NAME}_interval.out"
++fi
++
++DEBUG_LOG=""
++if [[ "$DEBUG_MODE" -eq 1 ]]; then
++  if [[ -n "$ARTIFACT_DIR" ]]; then
++    mkdir -p "$ARTIFACT_DIR"
++    DEBUG_LOG="$ARTIFACT_DIR/interval-debug.log"
++  else
++    mkdir -p "$(dirname "$OUTPUT_FILE")"
++    DEBUG_LOG="${OUTPUT_FILE}.debug.log"
++  fi
++  : > "$DEBUG_LOG"
++fi
++
++declare -a PRE_PIPELINE=()
++for PASS_NAME in "${PREPASS_ORDER[@]}"; do
++  case "$PASS_NAME" in
++    sroa)
++      if [[ "$PRE_SROA" -eq 1 ]]; then
++        PRE_PIPELINE+=("sroa")
++      fi
++      ;;
++    mem2reg)
++      if [[ "$PRE_MEM2REG" -eq 1 ]]; then
++        PRE_PIPELINE+=("mem2reg")
++      fi
++      ;;
++    simplifycfg)
++      if [[ "$PRE_SIMPLIFYCFG" -eq 1 ]]; then
++        PRE_PIPELINE+=("simplifycfg")
++      fi
++      ;;
++    loop-simplify)
++      if [[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]]; then
++        PRE_PIPELINE+=("loop-simplify")
++      fi
++      ;;
++  esac
++done
++
++PRE_PASS_PIPELINE="$(IFS=,; echo "${PRE_PIPELINE[*]}")"
++PASS_PIPELINE="$PRE_PASS_PIPELINE"
++if [[ -n "$PASS_PIPELINE" ]]; then
++  PASS_PIPELINE+=",interval-analysis"
++else
++  PASS_PIPELINE="interval-analysis"
++fi
++
++echo "Pre-Pass Running (configured order: $(join_by ' -> ' "${PREPASS_ORDER[@]}")):"
++echo "  sroa: $([[ "$PRE_SROA" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  mem2reg: $([[ "$PRE_MEM2REG" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  simplifycfg: $([[ "$PRE_SIMPLIFYCFG" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  loop-simplify: $([[ "$PRE_LOOP_SIMPLIFY" -eq 1 ]] && echo enabled || echo disabled)"
++echo "  config: $(basename "$CONFIG_FILE")"
++echo "  debug: $([[ "$DEBUG_MODE" -eq 1 ]] && echo enabled || echo disabled)"
++echo "Pipeline: $PASS_PIPELINE"
++
++if [[ -n "$ARTIFACT_DIR" ]]; then
++  mkdir -p "$ARTIFACT_DIR"
++
++  ORIGINAL_IR="$ARTIFACT_DIR/original.ir"
++  PREPASS_IR="$ARTIFACT_DIR/after-prepass.ir"
++  REPORT_MD="$ARTIFACT_DIR/result.md"
++
++  cp "$WORK_IR" "$ORIGINAL_IR"
++
++  if [[ -n "$PRE_PASS_PIPELINE" ]]; then
++    if [[ "$DEBUG_MODE" -eq 1 ]]; then
++      "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -S -passes="$PRE_PASS_PIPELINE" "$ORIGINAL_IR" -o "$PREPASS_IR" 2>>"$DEBUG_LOG"
++    else
++      "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -S -passes="$PRE_PASS_PIPELINE" "$ORIGINAL_IR" -o "$PREPASS_IR"
++    fi
++  else
++    cp "$ORIGINAL_IR" "$PREPASS_IR"
++  fi
++
++  {
++    echo "# Interval Analysis Report"
++    echo
++    echo '```text'
++    echo "+------------------------------------------------------------------+"
++    echo "|                    INTERVAL ANALYSIS REPORT                      |"
++    echo "+------------------------------------------------------------------+"
++    echo "| Test File   : $INPUT_FILE"
++    echo "| Pre-Passes  : ${PRE_PASS_PIPELINE:-none}"
++    echo "| Main Pass   : interval-analysis"
++    echo "+------------------------------------------------------------------+"
++    echo '```'
++    echo
++    echo "## Generated Artifacts"
++    echo
++    echo "- original.ir"
++    echo "- after-prepass.ir"
++    echo
++    echo "## Final Interval Output"
++    echo
++    echo '```text'
++    if [[ "$DEBUG_MODE" -eq 1 ]]; then
++      "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -disable-output -passes="interval-analysis" "$PREPASS_IR" 2>>"$DEBUG_LOG"
++    else
++      "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -disable-output -passes="interval-analysis" "$PREPASS_IR"
++    fi
++    echo '```'
++  } > "$REPORT_MD"
++  echo "Artifact directory: $ARTIFACT_DIR"
++  echo "Markdown report: $REPORT_MD"
++else
++  if [[ "$DEBUG_MODE" -eq 1 ]]; then
++    "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -disable-output -passes="$PASS_PIPELINE" "$WORK_IR" > "$OUTPUT_FILE" 2>>"$DEBUG_LOG"
++  else
++    "$OPT_BIN" "${OPT_EXTRA_ARGS[@]}" -disable-output -passes="$PASS_PIPELINE" "$WORK_IR" > "$OUTPUT_FILE"
++  fi
++fi
++
++if [[ -n "$ARTIFACT_DIR" ]]; then
++  echo "Interval analysis report: $REPORT_MD"
++else
++  echo "Interval analysis output: $OUTPUT_FILE"
++fi
++if [[ -n "$DEBUG_LOG" ]]; then
++  echo "Debug log: $DEBUG_LOG"
++fi
++
++if [[ -n "$TEMP_IR" && "$KEEP_IR" -eq 0 ]]; then
++  rm -f "$TEMP_IR"
++fi

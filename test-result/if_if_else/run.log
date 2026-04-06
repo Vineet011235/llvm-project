@@ -1,0 +1,14 @@
+Build: checking for stale changes with ninja (incremental)
+ninja: Entering directory `/home/decompiler/llvm/llvm-project/build'
+ninja: no work to do.
+Pre-Pass Running (configured order: sroa mem2reg simplifycfg loop-simplify):
+  sroa: disabled
+  mem2reg: enabled
+  simplifycfg: disabled
+  loop-simplify: enabled
+  config: interval-analysis.config.sh
+  debug: disabled
+Pipeline: mem2reg,loop-simplify,interval-analysis
+Artifact directory: /home/decompiler/llvm/llvm-project/test-result/if_if_else
+Markdown report: /home/decompiler/llvm/llvm-project/test-result/if_if_else/result.md
+Interval analysis report: /home/decompiler/llvm/llvm-project/test-result/if_if_else/result.md
