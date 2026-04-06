@@ -1116,6 +1116,45 @@ PreservedAnalyses CustomIntervalAnalysisPass::run(Function &F,
       break;
   }
 
+  // Recompute a no-widening fixpoint so narrowed header facts propagate to
+  // the rest of the CFG (e.g. loop exits) instead of leaving stale states.
+  std::deque<const BasicBlock *> PropagateWorklist;
+  DenseSet<const BasicBlock *> InPropagateWorklist;
+  for (const BasicBlock *BB : RPO)
+    PropagateWorklist.push_back(BB), InPropagateWorklist.insert(BB);
+
+  while (!PropagateWorklist.empty()) {
+    const BasicBlock *BB = PropagateWorklist.front();
+    PropagateWorklist.pop_front();
+    InPropagateWorklist.erase(BB);
+
+    BlockState NewIn = mergePredecessorOut(BB, OUT, EntrySeed, BB == EntryBB);
+
+    bool InChanged = true;
+    auto OldInIt = IN.find(BB);
+    if (OldInIt != IN.end())
+      InChanged = !statesEqual(NewIn, OldInIt->second);
+
+    if (InChanged)
+      IN[BB] = NewIn;
+
+    BlockState NewOut = transferBlock(*BB, NewIn, OUT);
+    applySuccessorPhiEdges(*BB, NewOut);
+
+    bool OutChanged = true;
+    auto OldOutIt = OUT.find(BB);
+    if (OldOutIt != OUT.end())
+      OutChanged = !statesEqual(NewOut, OldOutIt->second);
+
+    if (OutChanged) {
+      OUT[BB] = std::move(NewOut);
+      for (const BasicBlock *Succ : successors(BB)) {
+        if (InPropagateWorklist.insert(Succ).second)
+          PropagateWorklist.push_back(Succ);
+      }
+    }
+  }
+
   printOutState(F, IN, OUT);
 
   return PreservedAnalyses::all();

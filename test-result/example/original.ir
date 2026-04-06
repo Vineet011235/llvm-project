@@ -11,7 +11,6 @@ entry:
   %retval = alloca i32, align 4
   %a = alloca i32, align 4
   %i = alloca i32, align 4
-  %b = alloca i32, align 4
   store i32 0, ptr %retval, align 4
   store i32 10, ptr %a, align 4
   store i32 0, ptr %i, align 4
@@ -35,9 +34,6 @@ for.inc:                                          ; preds = %for.body
   br label %for.cond, !llvm.loop !6
 
 for.end:                                          ; preds = %for.cond
-  %3 = load i32, ptr %a, align 4
-  %mul = mul nsw i32 %3, 2
-  store i32 %mul, ptr %b, align 4
   ret i32 0
 }
 

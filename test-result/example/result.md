@@ -69,6 +69,5 @@
 | %cmp     | [-INF, INF] | [-INF, INF] |
 | %i.0     | [5, INF]    | [5, INF]    |
 | %inc     | [1, INF]    | [1, INF]    |
-| %mul     | -           | [20, INF]   |
 
 ```

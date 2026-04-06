@@ -25,7 +25,6 @@ for.inc:                                          ; preds = %for.body
   br label %for.cond, !llvm.loop !6
 
 for.end:                                          ; preds = %for.cond
-  %mul = mul nsw i32 %a.0, 2
   ret i32 0
 }
 
